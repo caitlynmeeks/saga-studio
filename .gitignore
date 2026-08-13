@@ -1,0 +1,35 @@
+# Nothing private ever enters this repo.
+#
+# Voice clips are effectively biometric: a 10-second reference is enough to
+# clone someone. Manuscripts are unpublished work. Rendered audio is both at
+# once. All of it lives outside the repo by default (SAGA_DATA / SAGA_VOICES),
+# and these rules are the belt to that braces.
+
+voices/
+*.wav
+*.mp3
+*.m4a
+*.flac
+*.aac
+*.ogg
+
+# project data: cards, imported manuscripts, rendered chunks, assembled books
+studio/
+data/
+output/
+overrides/
+input/
+
+# secrets
+.env
+.env.*
+*.key
+*.pem
+secrets.json
+settings.json
+
+__pycache__/
+*.pyc
+.venv/
+venv/
+.DS_Store
