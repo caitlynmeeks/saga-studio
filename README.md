@@ -51,7 +51,11 @@ Only the first **6 seconds** shape cadence and the first **10** shape timbre
   parameters, with a note about when to use it. Make a flat one for a character
   reading a machine log and a warm one for the same character in conversation,
   then pick per card. Profiles are global, so they work across every project.
-- **Preview selection** speaks just the words you highlight, at full quality —
+- **Cards fit their text.** Nothing is hidden below a fold by default; drag a
+  card's corner to set a size of your own and it sticks, in either direction.
+- **↗** on a document, and **open renders folder** in the footer, show the
+  files in the Finder.
+- **Preview selected** speaks just the words you highlight, at full quality —
   same voice, same parameters, so it is exactly what the bake will say.
   Chatterbox has no low-quality mode; the only real speedup is less text.
 - **Renders run in the background.** Queue several, switch documents, close the
@@ -59,6 +63,9 @@ Only the first **6 seconds** shape cadence and the first **10** shape timbre
 - **Undo** is 25 deep and covers edits, split, merge, duplicate and remove.
 - **Bake** renders everything stale. **Assemble** stitches the book into an MP3,
   giving `❦` scene breaks a longer rest.
+- **Back up** with *export everything* — one `.sagaproj` file holding every
+  document, the voice clips and profiles they need, and the rendered audio.
+  Restore by dropping it back on the left. See below.
 - **Discuss** shells out to the Claude Code CLI with selected cards as context,
   if you have it installed. Entirely optional.
 
@@ -75,6 +82,43 @@ Defaults are `~/.saga-studio` for project data and `./voices` for clips. The
 defence. A ten-second reference clip is enough to clone a voice — treat those
 files accordingly.
 
+## Backups
+
+*Export everything* under **backup** on the left writes a single `.sagaproj` —
+a gzipped tar you can copy to another disk. The `⤓` on a document exports just
+that one. Restore either by pressing *import…* or by dropping the file on the
+same panel you drop manuscripts on.
+
+```
+manifest.json              schema, what is inside, voice checksums
+profiles.json              only the profiles those documents use
+projects/<name>/doc.json   cards, params, notes
+projects/<name>/source.md  the untouched import
+voices/<stem>.wav          only the clips those profiles can speak with
+audio/<hash>.wav           rendered chunks — optional, and nearly all the size
+```
+
+**Include rendered audio** is the whole question. With it, a 28-episode library
+is a couple of hundred megabytes and restores complete. Without it, the same
+backup is a few megabytes — and because chunk hashes do not depend on the
+machine, restoring re-renders to *exactly* the same chunks. One is a backup of
+the work; the other is a backup of the hours.
+
+The assembled mp3 is deliberately left out: it is derived, it is large, and
+*assemble* rebuilds it in seconds from the chunks that are in there.
+
+**Nothing global is ever overwritten on import.** Voice clips and profiles are
+shared by every document, so an incoming `caitlyn2` whose bytes differ from
+yours lands beside it as `caitlyn2-imported` and only the arriving document is
+pointed at it — your other books cannot change how they sound because you
+imported something. Renaming a voice would normally invalidate every hash that
+mentions it, so hashes are recomputed on the way in and the cached audio is
+re-filed to match; nothing needs re-rendering. Restoring onto the machine that
+made the archive renames nothing at all.
+
+For a document whose name is already taken, *on import, if it is already here*
+decides: leave yours, replace yours, or keep both.
+
 ## Delivery parameters
 
 | knob | what it does |
@@ -90,7 +134,7 @@ changing character.
 
 ## Roadmap
 
-See [ROADMAP.md](ROADMAP.md) — project export/import, sound-effect cards with
+See [ROADMAP.md](ROADMAP.md) — per-card clip export, sound-effect cards with
 mixing, external editor hand-off, and rendering a selection as one unit.
 
 ## Licence

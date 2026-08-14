@@ -27,6 +27,9 @@ import os
 import re
 import shutil
 import subprocess
+import sys
+import tarfile
+import tempfile
 import threading
 import time
 import wave
@@ -38,18 +41,27 @@ HERE = Path(__file__).resolve().parent
 # Data lives OUTSIDE the repo by default: voice clips and manuscripts are
 # private, and a tool should never assume it may publish its user's material.
 # Point these anywhere with SAGA_DATA / SAGA_VOICES.
-ROOT = Path(os.environ.get("SAGA_DATA") or (Path.home() / ".saga-studio"))
+ROOT = Path(os.environ.get("SAGA_DATA") or (Path.home() / ".saga-studio")).expanduser()
 AUDIO = ROOT / "audio"
-VOICES = Path(os.environ.get("SAGA_VOICES") or (HERE / "voices"))
+VOICES = Path(os.environ.get("SAGA_VOICES") or (HERE / "voices")).expanduser()
 PORT = int(os.environ.get("PORT", "5010"))
+# Localhost by default. SAGA_HOST=0.0.0.0 exposes it to the LAN — see the
+# README: there is no login, and the discuss window shells out to Claude, so
+# anyone who can reach the port can read the manuscript and spend tokens.
+# SAGA_TOKEN adds a shared secret if the network is not fully trusted.
+HOST = os.environ.get("SAGA_HOST", "127.0.0.1")
+TOKEN = os.environ.get("SAGA_TOKEN", "")
 CLAUDE = shutil.which("claude") or "/opt/homebrew/bin/claude"
+OPEN_CMD = "open" if sys.platform == "darwin" else "xdg-open"
 
-ROOT.mkdir(exist_ok=True)
-AUDIO.mkdir(exist_ok=True)
+ROOT.mkdir(parents=True, exist_ok=True)
+AUDIO.mkdir(parents=True, exist_ok=True)
 
 _model = None
 _lock = threading.Lock()          # MPS: one generate() at a time
-_bake = {"running": False, "done": 0, "total": 0, "project": "", "label": ""}
+_bake = {"running": False, "done": 0, "total": 0, "project": "", "label": "",
+         "cancel": False, "stopped": False}
+_docmut = threading.Lock()        # one doc.json read-modify-write at a time
 
 DEFAULTS = {"voice": "caitlyn2", "exag": 0.4, "cfg": 0.35,
             "temp": 0.7, "rep": 1.2}
@@ -133,9 +145,11 @@ def save_profiles(p):
     PROFILES.write_text(json.dumps(p, indent=1))
 
 
-def profile_params(name):
-    p = profiles()
-    prof = p.get(name) or p["Default"]
+def profile_params(name, profs=None):
+    """`profs` overrides what is on disk. Import needs to ask what a chunk
+    hashed to under the *archive's* profiles, which are not this machine's."""
+    p = profiles() if profs is None else profs
+    prof = p.get(name) or p.get("Default") or BASE_PROFILE
     voices = prof.get("voices") or ["caitlyn2"]
     idx = min(prof.get("active", 0), len(voices) - 1)
     return {"voice": voices[idx],
@@ -143,15 +157,15 @@ def profile_params(name):
             "temp": prof.get("temp", 0.7), "rep": prof.get("rep", 1.2)}
 
 
-def params_for(c, doc):
+def params_for(c, doc, profs=None):
     """DEFAULTS <- doc defaults <- the card's profile <- per-card override."""
     return {**DEFAULTS, **doc.get("params", {}),
-            **profile_params(c.get("profile", "Default")),
+            **profile_params(c.get("profile", "Default"), profs),
             **c.get("params", {})}
 
 
-def chunk_hash(c, doc):
-    p = params_for(c, doc)
+def chunk_hash(c, doc, profs=None):
+    p = params_for(c, doc, profs)
     key = json.dumps([c["text"], p["voice"], p["exag"], p["cfg"],
                       p["temp"], p["rep"]], sort_keys=True)
     return hashlib.sha256(key.encode()).hexdigest()[:20]
@@ -184,19 +198,47 @@ def snapshot(doc, label):
 
 
 def save(doc):
+    """Write via a temp file and rename. os.replace is atomic, so a crash or a
+    kill mid-write leaves the previous doc.json intact rather than a truncated
+    one that takes the whole server down on next boot.
+
+    The temp name must be unique per write. A shared "doc.json.tmp" is not
+    safe just because the rename is: two threads opening it at once each get
+    their own file offset, so the second one's truncate-on-open resets the
+    length while the first keeps writing past it. The rename then publishes
+    the hybrid — a complete document with the tail of another stuck on the
+    end, which is exactly the "Extra data" JSONDecodeError that made a
+    project unreadable. fsync before the rename so the bytes are on disk and
+    not merely in the page cache when the directory entry flips."""
     d = pdir(doc["name"])
     d.mkdir(parents=True, exist_ok=True)
-    (d / "doc.json").write_text(json.dumps(doc, indent=1))
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".doc.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(json.dumps(doc, indent=1))
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, d / "doc.json")
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
 
 def projects():
     out = []
+    profs = profiles()          # read once, not once per chunk of every project
     for d in sorted(ROOT.iterdir()):
         f = d / "doc.json"
         if f.exists():
-            doc = json.loads(f.read_text())
+            try:
+                doc = json.loads(f.read_text())
+            except json.JSONDecodeError:
+                out.append({"name": d.name, "title": f"{d.name} (unreadable)",
+                            "chunks": 0, "ready": 0, "words": 0, "broken": True})
+                continue
             chunks = doc["chunks"]
-            ready = sum(1 for c in chunks if (AUDIO / f"{chunk_hash(c, doc)}.wav").exists())
+            ready = sum(1 for c in chunks
+                        if (AUDIO / f"{chunk_hash(c, doc, profs)}.wav").exists())
             out.append({"name": doc["name"], "title": doc.get("title", doc["name"]),
                         "chunks": len(chunks), "ready": ready,
                         "words": sum(len(c["text"].split()) for c in chunks)})
@@ -215,6 +257,315 @@ def import_md(title, md):
     (d / "source.md").write_text(md, encoding="utf-8")
     save(doc)
     return doc
+
+
+# ── export / import ─────────────────────────────────────────────────────
+# One portable file per backup: a gzipped tar, because tar is already
+# everywhere, streams, and survives being emailed.
+#
+#   manifest.json             schema, kind, created, projects, voice checksums
+#   profiles.json             only the profiles those projects actually use
+#   projects/<name>/doc.json  cards, params, notes
+#   projects/<name>/source.md the untouched import
+#   voices/<stem>.wav         only the clips those profiles can speak with
+#   audio/<hash>.wav          rendered chunks — optional, and nearly all the size
+#
+# The manifest is written first so that reading "what is in here?" does not
+# mean decompressing a few hundred megabytes of audio to reach the last member.
+# The assembled mp3 in out/ is deliberately left out: it is derived, it is
+# large, and assemble() rebuilds it in seconds from the chunks that are here.
+ARCHIVE_SCHEMA = 1
+
+# Extraction allowlist. tar members are attacker-controlled paths in the
+# general case, so nothing is unpacked unless its name matches a shape this
+# program writes — which rules out absolute paths, "..", symlinks and devices
+# without relying on any particular Python version's tarfile filter.
+ARC_MEMBER = re.compile(
+    r"^(manifest\.json|profiles\.json"
+    r"|projects/[a-z0-9_-]{1,60}/(doc\.json|source\.md)"
+    r"|voices/[a-z0-9_.-]{1,44}\.(wav|mp3|flac|m4a)"
+    r"|audio/[a-z0-9]{1,40}\.wav)$")
+_EXTRACT = {"filter": "data"} if hasattr(tarfile, "data_filter") else {}
+
+
+def sha256_file(p):
+    h = hashlib.sha256()
+    with open(p, "rb") as f:
+        for blk in iter(lambda: f.read(1 << 20), b""):
+            h.update(blk)
+    return h.hexdigest()
+
+
+def voices_and_profiles(doc, profs):
+    """What this project can speak with.
+
+    Every profile its cards name, and every clip in those profiles — not only
+    the active one. Switching between a profile's clips is an ordinary edit, so
+    an export carrying just the active clip would break the first time you
+    changed it on the far side. "Default" is always included: it is what a card
+    falls back to when its profile has gone."""
+    pnames, vnames = {"Default"}, set()
+    for c in doc["chunks"]:
+        pnames.add(c.get("profile", "Default"))
+        v = (c.get("params") or {}).get("voice")
+        if v:
+            vnames.add(v)
+    v = (doc.get("params") or {}).get("voice")
+    if v:
+        vnames.add(v)
+    for n in pnames:
+        vnames.update((profs.get(n) or {}).get("voices") or [])
+    return vnames, pnames
+
+
+def plan_export(names, with_audio):
+    """Work out exactly what goes in before writing a byte.
+
+    Two reasons. The UI can show the real size up front — a whole library with
+    audio is hundreds of megabytes, which is worth knowing before you click.
+    And the manifest, which needs every checksum, can then be the *first*
+    member of the tar rather than the last."""
+    profs = profiles()
+    plan = {"schema": ARCHIVE_SCHEMA, "created": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "with_audio": bool(with_audio), "projects": [], "voices": {},
+            "unreadable": [], "missing_voices": [], "bytes": 0}
+    vnames, pnames, audio = set(), set(), {}
+    for nm in names:
+        try:
+            doc = load(nm)
+        except json.JSONDecodeError:
+            plan["unreadable"].append(nm)
+            continue
+        if not doc:
+            continue
+        d = pdir(nm)
+        vs, ps = voices_and_profiles(doc, profs)
+        vnames |= vs
+        pnames |= ps
+        rendered = 0
+        for c in doc["chunks"]:
+            f = AUDIO / f"{chunk_hash(c, doc, profs)}.wav"
+            if not f.exists():
+                continue
+            rendered += 1
+            if with_audio and f.name not in audio:
+                audio[f.name] = f
+                plan["bytes"] += f.stat().st_size
+        src = d / "source.md"
+        plan["projects"].append({"name": d.name, "title": doc.get("title", nm),
+                                 "chunks": len(doc["chunks"]), "rendered": rendered,
+                                 "source": src.exists()})
+        plan["bytes"] += (d / "doc.json").stat().st_size
+        if src.exists():
+            plan["bytes"] += src.stat().st_size
+    for v in sorted(vnames):
+        try:
+            f = voice_file(v)
+        except FileNotFoundError:
+            # A profile naming a clip that is no longer on disk. Say so rather
+            # than packing quietly: the point of a backup is that it is whole,
+            # and a missing voice is not something to discover on restore day.
+            plan["missing_voices"].append(v)
+            continue
+        plan["voices"][v] = {"file": f.name, "sha": sha256_file(f),
+                             "bytes": f.stat().st_size}
+        plan["bytes"] += f.stat().st_size
+    plan["kind"] = "library" if len(plan["projects"]) > 1 else "project"
+    plan["_profiles"] = {n: profs[n] for n in sorted(pnames) if n in profs}
+    plan["_audio"] = audio
+    return plan
+
+
+def _tarinfo(name, size):
+    ti = tarfile.TarInfo(name)
+    ti.size = size
+    ti.mtime = int(time.time())
+    ti.mode = 0o644
+    ti.uid = ti.gid = 0
+    ti.uname = ti.gname = ""      # no need to tell the far side who packed it
+    return ti
+
+
+def _add_bytes(tar, name, data):
+    tar.addfile(_tarinfo(name, len(data)), io.BytesIO(data))
+
+
+def _add_file(tar, path, name):
+    with open(path, "rb") as f:
+        tar.addfile(_tarinfo(name, path.stat().st_size), f)
+
+
+def write_archive(plan, dest):
+    """Pack a plan into `dest`.
+
+    Gzip level 1 whenever audio is included: WAV barely compresses, so the
+    higher levels spend minutes of CPU to save a couple of per cent."""
+    audio = plan.pop("_audio", {})
+    profs = plan.pop("_profiles", {})
+    manifest = dict(plan, audio=sorted(audio))
+    with tarfile.open(dest, "w:gz", compresslevel=1 if plan["with_audio"] else 6) as tar:
+        _add_bytes(tar, "manifest.json", json.dumps(manifest, indent=1).encode())
+        _add_bytes(tar, "profiles.json", json.dumps(profs, indent=1).encode())
+        for p in plan["projects"]:
+            d = ROOT / p["name"]
+            _add_file(tar, d / "doc.json", f"projects/{p['name']}/doc.json")
+            if p["source"]:
+                _add_file(tar, d / "source.md", f"projects/{p['name']}/source.md")
+        for meta in plan["voices"].values():
+            _add_file(tar, VOICES / meta["file"], f"voices/{meta['file']}")
+        for name, f in sorted(audio.items()):
+            _add_file(tar, f, f"audio/{name}")
+    return dest
+
+
+def _free_name(taken, base, suffix="imported"):
+    if base not in taken:
+        return base
+    n = f"{base}-{suffix}"
+    i = 2
+    while n in taken:
+        n, i = f"{base}-{suffix}-{i}", i + 1
+    return n
+
+
+def _same_profile(a, b):
+    """`note` is prose about when to use the profile; it does not change how a
+    single character sounds, so it is not grounds for forking a second copy."""
+    return all(a.get(k, BASE_PROFILE.get(k)) == b.get(k, BASE_PROFILE.get(k))
+               for k in ("voices", "active", "exag", "cfg", "temp", "rep"))
+
+
+def import_archive(path, mode="skip"):
+    """Restore projects from a .sagaproj. `mode` decides what a name collision
+    means: skip the incoming one, replace what is here, or keep both.
+
+    Two rules the rest of this falls out of.
+
+    **Never overwrite a voice clip or a profile.** Both are global — a clip is
+    what *every* project using that name sounds like — so silently replacing
+    one would change books that have nothing to do with this import. An
+    incoming clip whose name matches but whose bytes differ lands beside it as
+    `<name>-imported`, and only the arriving project is pointed at the copy.
+    Profiles are reconciled the same way, for the same reason.
+
+    **Renaming either one changes what a chunk hashes to**, because the voice
+    name is part of the hash key — so every rendered chunk in the archive would
+    look stale the moment it landed. Hashes are therefore recomputed on the way
+    in, once under the archive's profiles and once under this machine's, and
+    each cached WAV is filed under its new name. A plain restore onto the
+    machine that made the archive renames nothing and takes the fast path."""
+    rep = {"projects": [], "voices": [], "profiles": [], "audio": 0, "skipped": []}
+    tmp = Path(tempfile.mkdtemp(prefix=".import-", dir=ROOT))
+    try:
+        with tarfile.open(path, "r:gz") as tar:
+            for m in tar:
+                if m.isfile() and ARC_MEMBER.match(m.name):
+                    tar.extract(m, tmp, set_attrs=False, **_EXTRACT)
+        if not (tmp / "manifest.json").exists():
+            raise ValueError("not a Saga Studio archive — no manifest inside")
+        man = json.loads((tmp / "manifest.json").read_text())
+        if man.get("schema", 0) > ARCHIVE_SCHEMA:
+            raise ValueError(f"made by a newer Saga Studio (schema {man['schema']}, "
+                             f"this one reads {ARCHIVE_SCHEMA})")
+
+        # ── voices ──
+        arc_profs = ({} if not (tmp / "profiles.json").exists()
+                     else json.loads((tmp / "profiles.json").read_text()))
+        arc_profs.setdefault("Default", dict(BASE_PROFILE))
+        VOICES.mkdir(parents=True, exist_ok=True)
+        seen_voices = {p.stem for p in VOICES.iterdir() if p.is_file()}
+        vmap = {}
+        vdir = tmp / "voices"
+        for f in sorted(vdir.iterdir()) if vdir.is_dir() else []:
+            try:
+                local = voice_file(f.stem)
+            except FileNotFoundError:
+                local = None
+            if local is not None and sha256_file(local) == sha256_file(f):
+                vmap[f.stem] = f.stem                     # already here, byte for byte
+                continue
+            new = f.stem if local is None else _free_name(seen_voices, f.stem)
+            shutil.copy2(f, VOICES / f"{new}{f.suffix}")
+            seen_voices.add(new)
+            vmap[f.stem] = new
+            if new != f.stem:
+                rep["voices"].append(f"voice “{f.stem}” arrived as “{new}” — a "
+                                     f"different clip already had that name")
+
+        # ── profiles ──
+        local_profs = profiles()
+        pmap = {}
+        for n, pr in arc_profs.items():
+            incoming = dict(pr, voices=[vmap.get(v, v) for v in (pr.get("voices") or [])])
+            cur = local_profs.get(n)
+            if cur is not None and _same_profile(cur, incoming):
+                pmap[n] = n
+                continue
+            new = n if cur is None else _free_name(set(local_profs), n)
+            local_profs[new] = incoming
+            pmap[n] = new
+            rep["profiles"].append(f"profile “{n}” added" if new == n else
+                                   f"profile “{n}” arrived as “{new}” — a different "
+                                   f"profile already had that name")
+        save_profiles(local_profs)
+
+        # ── projects ──
+        taken = {d.name for d in ROOT.iterdir() if (d / "doc.json").exists()}
+        pdirs = tmp / "projects"
+        for pd in sorted(pdirs.iterdir()) if pdirs.is_dir() else []:
+            if not (pd / "doc.json").exists():
+                continue
+            doc = json.loads((pd / "doc.json").read_text())
+            target, copied = pd.name, False
+            if target in taken:
+                if mode == "skip":
+                    rep["skipped"].append(doc.get("title", target))
+                    continue
+                if mode == "replace":
+                    shutil.rmtree(ROOT / target, ignore_errors=True)
+                else:
+                    target, copied = _free_name(taken, target, "copy"), True
+
+            # hashes as the archive knew them, before anything is repointed
+            old = [chunk_hash(c, doc, arc_profs) for c in doc["chunks"]]
+            doc["name"] = target
+            if copied:
+                doc["title"] = f"{doc.get('title', target)} (imported)"
+            for c in doc["chunks"]:
+                # Only write the key back if it was there or the name actually
+                # moved. Adding an explicit "Default" to a card that never had
+                # one would mean a plain restore did not return the document it
+                # was handed, and a backup that quietly rewrites is a backup you
+                # cannot check.
+                was = c.get("profile", "Default")
+                if pmap.get(was, was) != was or "profile" in c:
+                    c["profile"] = pmap.get(was, was)
+                cp = c.get("params") or {}
+                if cp.get("voice"):
+                    cp["voice"] = vmap.get(cp["voice"], cp["voice"])
+            dp = doc.get("params") or {}
+            if dp.get("voice"):
+                dp["voice"] = vmap.get(dp["voice"], dp["voice"])
+            new = [chunk_hash(c, doc, local_profs) for c in doc["chunks"]]
+
+            for o, n in zip(old, new):
+                src, dst = tmp / "audio" / f"{o}.wav", AUDIO / f"{n}.wav"
+                # copy, not move: two projects can share a chunk hash, and the
+                # second one still needs the file the first one took
+                if src.exists() and not dst.exists():
+                    shutil.copy2(src, dst)
+                    rep["audio"] += 1
+
+            (ROOT / target).mkdir(parents=True, exist_ok=True)
+            if (pd / "source.md").exists():
+                shutil.copy2(pd / "source.md", ROOT / target / "source.md")
+            save(doc)
+            taken.add(target)
+            rep["projects"].append({"name": target, "title": doc.get("title", target),
+                                    "chunks": len(doc["chunks"])})
+        return rep
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 # ── audio ───────────────────────────────────────────────────────────────
@@ -341,17 +692,26 @@ threading.Thread(target=worker, daemon=True).start()
 
 
 def bake(name):
+    """Render every stale card. Stoppable between cards, not mid-card: a
+    generate() call on MPS cannot be interrupted without losing the model, so
+    /api/bake_stop lets the current card finish and skips the rest. Everything
+    already rendered stays on disk, so a later bake resumes where this left
+    off rather than starting over."""
     doc = load(name)
     todo = [c for c in doc["chunks"]
             if not c.get("mute") and not (AUDIO / f"{chunk_hash(c, doc)}.wav").exists()]
-    _bake.update(running=True, done=0, total=len(todo), project=name, label="")
+    _bake.update(running=True, done=0, total=len(todo), project=name, label="",
+                 cancel=False, stopped=False)
     try:
         for c in todo:
+            if _bake["cancel"]:
+                _bake["stopped"] = True
+                break
             _bake["label"] = c["text"][:60]
             render(c, doc)
             _bake["done"] += 1
     finally:
-        _bake.update(running=False, label="")
+        _bake.update(running=False, label="", cancel=False)
 
 
 def assemble(name, gap=0.35):
@@ -419,6 +779,15 @@ class H(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
+    def _authed(self):
+        if not TOKEN:
+            return True
+        if TOKEN in (self.headers.get("Cookie") or ""):
+            return True
+        if parse_qs(urlparse(self.path).query).get("k", [""])[0] == TOKEN:
+            return True
+        return False
+
     def _send(self, code, body, ctype="application/json"):
         b = body if isinstance(body, bytes) else json.dumps(body).encode()
         self.send_response(code)
@@ -427,9 +796,31 @@ class H(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b)
 
+    def _send_file(self, path, ctype, filename=None):
+        """Copy straight from disk. An archive of the whole library runs to
+        hundreds of megabytes; _send would hold every byte of it in memory."""
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(path.stat().st_size))
+        if filename:
+            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+        self.end_headers()
+        with open(path, "rb") as f:
+            shutil.copyfileobj(f, self.wfile, 1 << 20)
+
     def do_GET(self):
         u = urlparse(self.path)
         q = parse_qs(u.query)
+        if not self._authed():
+            return self._send(401, b"Add ?k=<SAGA_TOKEN> to the URL.", "text/plain")
+        if TOKEN and q.get("k") and u.path == "/":   # only the page sets the cookie
+            self.send_response(200)
+            self.send_header("Set-Cookie", f"{TOKEN}; Path=/; Max-Age=604800")
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            body = (HERE / "studio_ui.html").read_bytes()
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            return self.wfile.write(body)
         if u.path == "/":
             return self._send(200, (HERE / "studio_ui.html").read_bytes(), "text/html; charset=utf-8")
         if u.path == "/api/state":
@@ -470,10 +861,65 @@ class H(BaseHTTPRequestHandler):
             if not f.exists():
                 return self._send(404, b"", "text/plain")
             return self._send(200, f.read_bytes(), "audio/mpeg")
+
+        if u.path in ("/api/export", "/api/export_plan"):
+            names = ([p["name"] for p in projects() if not p.get("broken")]
+                     if q.get("all", [""])[0] == "1" else q.get("name", []))
+            plan = plan_export(names, q.get("audio", ["1"])[0] == "1")
+            if u.path == "/api/export_plan":
+                plan.pop("_audio", None)
+                plan.pop("_profiles", None)
+                return self._send(200, plan)
+            if not plan["projects"]:
+                return self._send(404, {"error": "nothing to export"})
+            stamp = time.strftime("%Y-%m-%d")
+            fn = (f"saga-backup-{stamp}.sagaproj" if len(plan["projects"]) > 1
+                  else f"{plan['projects'][0]['name']}-{stamp}.sagaproj")
+            # Built to a temp file rather than streamed as it is packed: the
+            # size is then known, so the browser shows real download progress
+            # instead of an open-ended spinner.
+            fd, tmp = tempfile.mkstemp(dir=ROOT, prefix=".export-", suffix=".tgz")
+            os.close(fd)
+            try:
+                write_archive(plan, Path(tmp))
+                return self._send_file(Path(tmp), "application/gzip", fn)
+            finally:
+                Path(tmp).unlink(missing_ok=True)
         return self._send(404, {"error": "?"})
+
+    def _import_archive(self, u):
+        """The body is the archive itself rather than JSON: a library backup is
+        hundreds of megabytes, and base64 in a JSON field would cost a third
+        again in transfer and hold the whole thing in memory at both ends."""
+        mode = parse_qs(u.query).get("mode", ["skip"])[0]
+        if mode not in ("skip", "replace", "copy"):
+            return self._send(400, {"error": f"unknown mode {mode!r}"})
+        n = int(self.headers.get("Content-Length") or 0)
+        if not n:
+            return self._send(400, {"error": "empty upload"})
+        fd, tmp = tempfile.mkstemp(dir=ROOT, prefix=".upload-", suffix=".tgz")
+        try:
+            with os.fdopen(fd, "wb") as f:
+                left = n
+                while left > 0:
+                    b = self.rfile.read(min(1 << 20, left))
+                    if not b:
+                        raise ValueError("upload cut short")
+                    f.write(b)
+                    left -= len(b)
+            with _docmut:
+                return self._send(200, {"ok": True, **import_archive(Path(tmp), mode)})
+        except Exception as ex:
+            return self._send(400, {"error": f"{type(ex).__name__}: {ex}"})
+        finally:
+            Path(tmp).unlink(missing_ok=True)
 
     def do_POST(self):
         u = urlparse(self.path)
+        if not self._authed():
+            return self._send(401, {"error": "unauthorised"})
+        if u.path == "/api/import_archive":
+            return self._import_archive(u)
         n = int(self.headers.get("Content-Length") or 0)
         d = json.loads(self.rfile.read(n) or "{}")
         # Every mutating route needs a real project; without this a bad name
@@ -482,6 +928,15 @@ class H(BaseHTTPRequestHandler):
             if load(d["name"]) is None:
                 return self._send(404, {"error": f"no project {d['name']!r}. "
                                                  f"have: {[p['name'] for p in projects()]}"})
+        # Mutating routes each load doc.json, change it and write it back, and
+        # ThreadingHTTPServer runs every request on its own thread. Two that
+        # overlap — a card's text save and its height autosave both firing, say
+        # — would otherwise both read the old document and the slower one would
+        # write back a copy that never saw the other's edit. Chat and assemble
+        # are slow and read-only, so they stay outside and never block typing.
+        lock = None if u.path in ("/api/chat", "/api/assemble", "/api/reveal") else _docmut
+        if lock:
+            lock.acquire()
         try:
             if u.path == "/api/import":
                 doc = import_md(d["title"], d["markdown"])
@@ -538,6 +993,52 @@ class H(BaseHTTPRequestHandler):
                 p[nm] = {**BASE_PROFILE, **p.get(nm, {}), **d.get("data", {})}
                 save_profiles(p)
                 return self._send(200, {"ok": True, "profiles": p})
+
+            if u.path == "/api/replace":
+                doc = load(d["name"])
+                find = d.get("find") or ""
+                if not find:
+                    return self._send(400, {"error": "nothing to find"})
+                repl = d.get("replace", "")
+                flags = 0 if d.get("case") else re.IGNORECASE
+                try:
+                    pat = (re.compile(find, flags) if d.get("regex")
+                           else re.compile((r"(?<!\w)%s(?!\w)" % re.escape(find))
+                                           if d.get("whole") else re.escape(find), flags))
+                except re.error as ex:
+                    return self._send(400, {"error": f"bad pattern: {ex}"})
+
+                hits, stale_now, hitcount = [], 0, 0
+                for c in doc["chunks"]:
+                    new, n = pat.subn(repl, c["text"])
+                    if not n:
+                        continue
+                    hitcount += n
+                    was_ready = (AUDIO / f"{chunk_hash(c, doc)}.wav").exists()
+                    if was_ready:
+                        stale_now += 1
+                    m = pat.search(c["text"])
+                    a, b = max(0, m.start() - 40), min(len(c["text"]), m.end() + 40)
+                    hits.append({"id": c["id"], "n": n, "was_ready": was_ready,
+                                 "new": normalise(new),
+                                 "before": c["text"][a:b], "after": new[a:b + len(repl) - (m.end()-m.start())]})
+
+                # ~0.13s of generation per character, measured on this machine
+                cost = int(sum(len(c["text"]) for c in doc["chunks"]
+                               if any(h["id"] == c["id"] and h["was_ready"] for h in hits)) * 0.13)
+                if not d.get("dry_run") and hits:
+                    # snapshot BEFORE writing, or undo restores the replacement
+                    snapshot(doc, f"replace “{find[:24]}”")
+                    byid = {h["id"]: h["new"] for h in hits}
+                    for c in doc["chunks"]:
+                        if c["id"] in byid:
+                            c["text"] = byid[c["id"]]
+                    save(doc)
+                for h in hits:
+                    h.pop("new", None)
+                return self._send(200, {"ok": True, "cards": len(hits), "matches": hitcount,
+                                        "stale": stale_now, "resec": cost,
+                                        "hits": hits[:40], "applied": not d.get("dry_run")})
 
             if u.path == "/api/undo":
                 doc = load(d["name"])
@@ -630,6 +1131,13 @@ class H(BaseHTTPRequestHandler):
                     return self._send(200, {"ok": False, "error": "already baking"})
                 threading.Thread(target=bake, args=(d["name"],), daemon=True).start()
                 return self._send(200, {"ok": True})
+            if u.path == "/api/bake_stop":
+                if not _bake["running"]:
+                    return self._send(200, {"ok": False, "error": "not baking"})
+                _bake["cancel"] = True
+                # The card in flight still finishes — see bake().
+                return self._send(200, {"ok": True, "remaining":
+                                        _bake["total"] - _bake["done"] - 1})
             if u.path == "/api/assemble":
                 f, missing = assemble(d["name"])
                 return self._send(200, {"ok": bool(f), "file": str(f) if f else None,
@@ -637,15 +1145,33 @@ class H(BaseHTTPRequestHandler):
             if u.path == "/api/chat":
                 return self._send(200, {"reply": ask_claude(
                     d.get("name"), d["question"], d.get("chunks"))})
+            if u.path == "/api/reveal":
+                # The path is built from pdir(), never from the request, so
+                # there is no way to point this at something outside the data
+                # directory — the name is sanitised down to [a-z0-9_-] first.
+                proj = pdir(d["name"])
+                if not proj.is_dir():
+                    return self._send(404, {"error": "no folder for that project yet"})
+                out = proj / "out"
+                target = out if d.get("what") == "out" and out.is_dir() else proj
+                subprocess.run([OPEN_CMD, str(target)], check=False)
+                return self._send(200, {"ok": True, "path": str(target),
+                                        "assembled": out.is_dir()})
             if u.path == "/api/delete":
                 shutil.rmtree(pdir(d["name"]), ignore_errors=True)
                 return self._send(200, {"ok": True})
         except Exception as ex:
             return self._send(500, {"error": f"{type(ex).__name__}: {ex}"})
+        finally:
+            if lock:
+                lock.release()
         return self._send(404, {"error": "?"})
 
 
 if __name__ == "__main__":
-    print(f"Saga Studio  ->  http://127.0.0.1:{PORT}")
+    where = "127.0.0.1" if HOST in ("127.0.0.1", "localhost") else HOST
+    print(f"Saga Studio  ->  http://{where}:{PORT}" + ("?k=<token>" if TOKEN else ""))
+    if HOST == "0.0.0.0":
+        print("Reachable on the local network. No login unless SAGA_TOKEN is set.")
     print("(model loads on the first render, not at boot)")
-    ThreadingHTTPServer(("127.0.0.1", PORT), H).serve_forever()
+    ThreadingHTTPServer((HOST, PORT), H).serve_forever()

@@ -8,31 +8,31 @@ Ordered by how much architecture each one disturbs.
 
 ---
 
-## 1. Export / import a project as one file
+## 1. Export / import a project as one file — **done, 2026-08-14**
 
-**What:** one button out, one button in. A single portable file containing
-`doc.json`, `source.md`, every voice clip the project references, the profiles
-it uses, and the rendered audio.
+Built as specified, with three things the sketch did not anticipate.
 
-**Shape:** gzipped tar with a distinct extension — `.sagaproj`. Tar because it
-is already everywhere, streams, and survives being emailed.
+**One archive holds many projects.** *Export everything* is the button people
+actually want — the whole library in one file — so the format carries a list of
+projects rather than exactly one, and `manifest.json` is the *first* member so
+reading "what is in here?" does not mean decompressing 231 MB to reach the end.
 
-```
-manifest.json      schema version, title, created, checksums
-doc.json           cards, profiles-in-use, params
-source.md          the untouched import
-voices/*.wav       only clips actually referenced
-audio/*.wav        rendered chunks (optional: --with-audio, it is the bulk)
-```
+**Voice renaming breaks the cache, so hashes are recomputed on import.** The
+sketch was right that a colliding clip must land as `<name>-imported` — but the
+voice name is part of the chunk hash, so renaming one silently invalidates
+every rendered chunk that mentions it. Import therefore hashes each card twice,
+once under the archive's profiles and once under this machine's, and re-files
+the cached WAV under the new name. Profiles collide the same way and are forked
+the same way, for the same reason: both are global.
 
-**Watch out:** audio is by far the largest part — a 5-hour book is ~1.5 GB of
-chunk WAVs. Offer *with* and *without* audio; without it, the importing side
-re-renders from the same hashes and lands in the same place.
+**Profiles too, not just voices.** The note at the bottom of this file said
+"voices are global, projects are not" — profiles are equally global and were
+the easier thing to get wrong.
 
-**On import:** voice-name collisions are the real hazard. If `caitlyn2.wav`
-already exists and differs by checksum, import as `caitlyn2-imported.wav` and
-repoint that project's profiles at it. Never silently overwrite a voice — it
-would change how every other project sounds.
+Measured on the 28-episode library: 231 MB packed in 5s with audio (gzip level
+1 — WAV does not compress, and the higher levels only spend CPU), 3 MB without.
+A restore into an empty library returns all 28 documents byte-identical and
+loses no rendered chunk.
 
 ## 2. Export clip
 
@@ -111,5 +111,7 @@ general selection used by both the chat context and this.
   Reference-count before unlinking anything.
 - **Chatterbox has no quality/speed dial** — checked. Sampling cost is per
   token, so "faster preview" always means *less text*, never *lower quality*.
-- **Voices are global, projects are not.** Any export/import has to reconcile
-  that.
+- **Voices and profiles are global, projects are not.** Import reconciles this
+  by never overwriting either one — see #1. Anything else that crosses machines
+  has to do the same, and has to remember that a rename changes what a chunk
+  hashes to.

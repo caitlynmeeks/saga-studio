@@ -17,7 +17,14 @@ header b{color:var(--bright);letter-spacing:.08em}
 aside,#chat{background:var(--panel);overflow-y:auto;padding:12px}
 aside{border-right:1px solid var(--line)}
 #chat{border-left:1px solid var(--line);display:flex;flex-direction:column}
-main{overflow-y:auto;padding:14px 18px}
+/* The centre column is one grid cell holding two stacked children: the
+   find/replace bar and the scrolling card list. Left as siblings of <main>
+   they became grid items of their own and shunted every later panel a
+   column to the right. min-height:0 lets <main> scroll instead of the
+   flex parent growing past the viewport. */
+#center{display:flex;flex-direction:column;min-height:0}
+#frbar{flex:none;padding:8px 18px;border-bottom:1px solid var(--line);background:var(--panel)}
+main{flex:1;min-height:0;overflow-y:auto;padding:14px 18px}
 footer{grid-column:1/-1;display:flex;align-items:center;gap:10px;padding:0 14px;
 background:var(--chrome);border-top:1px solid var(--line)}
 h2{font-size:11px;text-transform:uppercase;letter-spacing:.14em;color:var(--dim);margin:2px 0 8px}
@@ -55,6 +62,8 @@ input[type=number]{width:62px}
 #log .me{color:var(--amber)}
 #ask{width:100%;height:64px;resize:vertical}
 .pill{font-size:10.5px;border:1px solid var(--line);border-radius:99px;padding:1px 7px;color:var(--faint)}
+button.tiny{padding:0 5px;font-size:12px;line-height:17px;border-color:transparent;color:var(--faint)}
+.proj:hover button.tiny{border-color:var(--line)}
 </style>
 </head>
 <body>
@@ -68,9 +77,26 @@ input[type=number]{width:62px}
 
 <aside>
   <h2>documents</h2>
-  <div id="drop">drop .md files here<br><span style="font-size:11px">or click to choose</span></div>
-  <input type="file" id="file" accept=".md,.markdown,.txt" multiple hidden>
+  <div id="drop">drop .md or .sagaproj here<br><span style="font-size:11px">or click to choose</span></div>
+  <input type="file" id="file" accept=".md,.markdown,.txt,.sagaproj" multiple hidden>
   <div id="projects" style="margin-top:12px"></div>
+
+  <h2 style="margin-top:18px">backup</h2>
+  <label class="mut" style="font-size:11px;display:block">
+    <input type="checkbox" id="bkaudio" checked> include rendered audio</label>
+  <label class="mut" style="font-size:11px;display:flex;gap:5px;align-items:center;margin-top:5px">
+    on import, if it is already here
+    <select id="bkmode" style="flex:1">
+      <option value="skip">leave mine</option>
+      <option value="replace">replace mine</option>
+      <option value="copy">keep both</option>
+    </select></label>
+  <div style="display:flex;gap:5px;margin-top:7px">
+    <button onclick="exportAll()">export everything</button>
+    <button onclick="$('arch').click()">import…</button>
+  </div>
+  <input type="file" id="arch" accept=".sagaproj" hidden>
+  <div id="bkmsg" class="mut" style="font-size:11px;margin-top:6px"></div>
 
   <h2 style="margin-top:18px">voice profiles</h2>
   <div id="profiles"></div>
@@ -81,7 +107,10 @@ input[type=number]{width:62px}
   <div id="profedit"></div>
 </aside>
 
-<main id="main"><p class="mut">Drop a markdown file on the left to begin.</p></main>
+<div id="center">
+  <div id="frbar" hidden></div>
+  <main id="main"><p class="mut">Drop a markdown file on the left to begin.</p></main>
+</div>
 
 <div id="chat">
   <h2>discuss</h2>
@@ -97,15 +126,18 @@ Selected chunks are sent as context.</div></div>
 <footer>
   <button id="undob" onclick="undo()" title="⌘Z">undo</button>
   <button class="pri" id="bakeb" onclick="bake()">bake all stale</button>
+  <button id="stopb" onclick="stopBake()" style="color:var(--red);border-color:var(--red)" hidden>stop</button>
   <button onclick="assemble()">assemble audiobook</button>
   <span class="mut" id="status"></span>
   <span style="flex:1"></span>
+  <button id="revealb" onclick="revealOut()" title="show the assembled audiobook in the Finder">open renders folder ↗</button>
   <a id="dl" class="mut" style="font-size:12px" href="#" hidden>download mp3</a>
 </footer>
 
 <script>
 const $=i=>document.getElementById(i);
 let DOC=null, SEL=new Set(), STATE={}, PREV={}, JOBS={}, POLL=null, HEIGHT={};
+let BAKETIMER=null, WASBAKING=false;
 
 async function api(p,b){const r=await fetch(p,b?{method:'POST',body:JSON.stringify(b)}:undefined);
   return r.json()}
@@ -123,6 +155,7 @@ drop.addEventListener('drop',e=>files(e.dataTransfer.files));
 
 async function files(list){
   for(const f of list){
+    if(/\.sagaproj$/i.test(f.name)){ await importArchive(f); continue; }
     const md=await f.text();
     const title=f.name.replace(/\.(md|markdown|txt)$/i,'').replace(/^\d+[-_]/,'');
     const r=await api('/api/import',{title,markdown:md});
@@ -130,27 +163,126 @@ async function files(list){
   }
   await refresh(); }
 
+// ── show in the Finder ────────────────────────────────────
+async function reveal(name,what){
+  const r=await api('/api/reveal',{name,what});
+  if(r.error)$('status').innerHTML=`<span class="warn">${esc(r.error)}</span>`;
+  return r;
+}
+// The footer button aims at the assembled book. Before anything is assembled
+// there is no out/ to open, so it lands on the project folder instead and says
+// why, rather than opening a window with nothing in it.
+async function revealOut(){
+  if(!DOC)return void($('status').textContent='open a document first');
+  const r=await reveal(DOC.name,'out');
+  if(r.ok&&!r.assembled)
+    $('status').innerHTML='<span class="warn">nothing assembled yet</span> — '+
+      'showing the document folder; press <b>assemble audiobook</b> to make the mp3';
+}
+
+// ── backup ────────────────────────────────────────────────
+// One file out, one file in: a gzipped tar holding the documents, the voice
+// clips and profiles they need, and (optionally) the rendered audio. Without
+// the audio a backup is tiny and re-renders to exactly the same chunks on the
+// way back, because the hashes do not change.
+const size=n=>n>=1e9?(n/1e9).toFixed(1)+' GB':n>=1e6?Math.round(n/1e6)+' MB':Math.max(1,Math.round(n/1e3))+' KB';
+const withAudio=()=>$('bkaudio').checked?1:0;
+
+const exportOne=name=>doExport('name='+encodeURIComponent(name));
+const exportAll=()=>doExport('all=1');
+
+async function doExport(qs){
+  const m=$('bkmsg'), q=qs+'&audio='+withAudio();
+  m.textContent='working out what to pack…';
+  const plan=await api('/api/export_plan?'+q);
+  if(plan.error) return void(m.innerHTML=`<span class="warn">${esc(plan.error)}</span>`);
+  if(!plan.projects.length) return void(m.textContent='nothing to export');
+  const rendered=plan.projects.reduce((a,p)=>a+p.rendered,0);
+  // The download only begins once the server has packed the whole archive, so
+  // say what is happening rather than sitting there looking broken.
+  m.innerHTML=`packing ${plan.projects.length} episode(s), ${rendered} rendered chunk(s), `+
+    `${Object.keys(plan.voices).length} voice(s) — about <b>${size(plan.bytes)}</b>.<br>`+
+    `<span class="mut">your browser saves it when it is ready`+
+    (plan.bytes>2e8?' — a minute or so at this size':'')+`</span>`+
+    (plan.unreadable.length?`<br><span class="warn">left out, unreadable: ${plan.unreadable.map(esc).join(', ')}</span>`:'')+
+    (plan.missing_voices.length?`<br><span class="warn">voice clip missing from disk, so not in the backup: ${plan.missing_voices.map(esc).join(', ')}</span>`:'');
+  window.location='/api/export?'+q;
+}
+
+$('arch').onchange=e=>{ const f=e.target.files[0]; e.target.value=''; if(f)importArchive(f); };
+
+async function importArchive(f){
+  const m=$('bkmsg');
+  m.textContent=`restoring ${f.name} (${size(f.size)})…`;
+  let j;
+  try{
+    const r=await fetch('/api/import_archive?mode='+$('bkmode').value,
+      {method:'POST',body:f,headers:{'Content-Type':'application/octet-stream'}});
+    j=await r.json();
+  }catch(ex){ j={error:String(ex)}; }
+  if(j.error) return void(m.innerHTML=`<span class="warn">${esc(j.error)}</span>`);
+  const bits=[`restored ${j.projects.length} episode(s)`];
+  if(j.audio) bits.push(`${j.audio} rendered chunk(s)`);
+  if(j.skipped.length) bits.push(`${j.skipped.length} already here, left alone`);
+  // Renames are the one thing worth reading: they mean a name collided and the
+  // incoming copy landed beside yours rather than over it.
+  const notes=[...j.voices,...j.profiles];
+  m.innerHTML=`<span class="ok">${bits.join(' · ')}</span>`+
+    (notes.length?`<div class="warn" style="margin-top:5px">${notes.map(esc).join('<br>')}</div>`:'');
+  await refresh();
+  if(DOC) open_(DOC.name,true);
+}
+
 // ── state ─────────────────────────────────────────────────
 async function refresh(){
   STATE=await api('/api/state');
   $('model').textContent='model: '+STATE.model;
   $('projects').innerHTML=STATE.projects.map(p=>`
-    <div class="proj ${DOC&&DOC.name===p.name?'sel':''}" onclick="open_('${p.name}')">
-      <div>${esc(p.title)}</div>
+    <div class="proj ${DOC&&DOC.name===p.name?'sel':''}" onclick="openProject('${p.name}')">
+      <div style="display:flex;gap:6px;align-items:center">
+        <span style="flex:1">${esc(p.title)}</span>
+        <button class="tiny" title="show this episode's folder"
+          onclick="event.stopPropagation();reveal('${p.name}')">↗</button>
+        <button class="tiny" title="export this episode"
+          onclick="event.stopPropagation();exportOne('${p.name}')">⤓</button>
+      </div>
       <div class="meta">${p.ready}/${p.chunks} rendered · ${p.words.toLocaleString()} words</div>
       <div class="bar"><i style="width:${p.chunks?100*p.ready/p.chunks:0}%"></i></div>
     </div>`).join('')||'<span class="mut" style="font-size:12px">none yet</span>';
   const b=STATE.bake;
-  if(b.running){ $('status').innerHTML=`<span class="warn">baking ${b.done}/${b.total}</span> — ${esc(b.label)}`;
-    $('bakeb').disabled=true; setTimeout(()=>{refresh();if(DOC)open_(DOC.name,true)},2500); }
-  else $('bakeb').disabled=false;
+  $('bakeb').disabled=b.running;
+  $('stopb').hidden=!b.running;
+  if(b.running){
+    WASBAKING=true;
+    $('status').innerHTML=`<span class="warn">baking ${b.done}/${b.total}</span> — `+
+      (b.cancel?'stopping after this card…':esc(b.label));
+    // One timer, not one per refresh() — stopBake and open_ both call refresh,
+    // and stacked timers would poll faster and faster until the bake ended.
+    clearTimeout(BAKETIMER);
+    // syncCards, not open_: a bake ticks this every 2.5s, and rebuilding the
+    // card list under you that often would eat both your edits and your clicks
+    BAKETIMER=setTimeout(()=>{refresh();if(DOC)syncCards()},2500);
+  } else {
+    clearTimeout(BAKETIMER); BAKETIMER=null;
+    $('stopb').disabled=false; $('stopb').textContent='stop';
+    if(WASBAKING){ WASBAKING=false;
+      $('status').innerHTML = b.stopped
+        ? `<span class="warn">bake stopped at ${b.done}/${b.total}</span> — bake again to resume`
+        : `<span class="ok">bake complete — ${b.done}/${b.total}</span>`;
+    }
+  }
 }
+
+// Switching document throws the card list away, so bank the edits first.
+async function openProject(name){ await flushAll(); await open_(name); }
 
 async function open_(name,quiet){
   DOC=await api('/api/doc?name='+encodeURIComponent(name));
   $('hdr').textContent=DOC.title+' · '+DOC.chunks.length+' chunks';
   if(!quiet)SEL.clear();
-  renderDoc(); watchHeights(); renderProfiles(); bindVoiceDrop(); if(!quiet)refresh();
+  // fit before observing, so the initial sizing is never mistaken for a drag
+  renderFR(); renderDoc(); fitAll(); watchHeights(); renderProfiles(); bindVoiceDrop();
+  if(!quiet)refresh();
   const rd=DOC.chunks.filter(c=>c.ready).length;
   $('dl').hidden=rd<DOC.chunks.length; $('dl').href='/api/download?name='+encodeURIComponent(name);
 }
@@ -235,7 +367,7 @@ function renderDoc(){
     <div class="top">
       <span class="dot ${c.mute?'':(c.ready?'ready':'stale')}"></span>
       <span>#${c.id}</span>
-      <span class="mut">${c.text.length} ch</span>
+      <span class="mut chars">${c.text.length} ch</span>
       <select onchange="setProfile(${c.id},this.value)" style="font-size:11px;padding:1px 4px">
         ${Object.keys(STATE.profiles||{}).map(p=>
           `<option ${ (c.profile||'Default')===p?'selected':''}>${p}</option>`).join('')}
@@ -245,11 +377,11 @@ function renderDoc(){
       <label class="mut" style="font-size:11px"><input type="checkbox" ${SEL.has(c.id)?'checked':''}
         onchange="pick(${c.id},this.checked)"> discuss</label>
     </div>
-    <textarea id="t${c.id}" onchange="saveText(${c.id})"${(HEIGHT[c.id]||c.height)?` style="height:${HEIGHT[c.id]||c.height}px"`:''}>${esc(c.text)}</textarea>
+    <textarea id="t${c.id}" oninput="touched(${c.id})" onblur="flush(${c.id})"${(HEIGHT[c.id]||c.height)?` style="height:${HEIGHT[c.id]||c.height}px"`:''}>${esc(c.text)}</textarea>
     <div class="act">
-      <button onclick="playFull(${c.id})" ${c.ready&&!c.mute?'':'disabled'}>▶ full</button>
-      <button onclick="playPrev(${c.id})" ${PREV[c.id]&&!c.mute?'':'disabled'}>▶ preview</button>
-      <button id="pv${c.id}" onclick="prev(${c.id})" ${c.mute?'disabled':''}>preview selection</button>
+      <button id="pf${c.id}" onclick="playFull(${c.id})" ${c.ready&&!c.mute?'':'disabled'}>▶ full</button>
+      <button id="pp${c.id}" onclick="playPrev(${c.id})" ${PREV[c.id]&&!c.mute?'':'disabled'}>▶ preview</button>
+      <button id="pv${c.id}" onclick="prev(${c.id})" disabled>preview selected</button>
       <button id="rb${c.id}" class="pri" onclick="one(${c.id})" ${c.mute?'disabled':''}>render</button>
       <button onclick="splitAt(${c.id})">split</button>
       <button onclick="merge(${c.id})">merge next</button>
@@ -260,6 +392,22 @@ function renderDoc(){
     </div>
    </div>`).join('');
 }
+// Cards fit their text by default — no card should hide a line you are trying
+// to read. Dragging the corner sets an explicit height, which then wins in
+// both directions and survives a reload; only cards with no dragged height
+// keep growing to fit as you type.
+function autosize(id){
+  const ta=$('t'+id); if(!ta)return;
+  ta._prog=true;                       // tell the observer this was not a drag
+  ta.style.height='auto';
+  ta.style.height=(ta.scrollHeight+2)+'px';
+  // ResizeObserver callbacks run in the rendering steps, before the next task,
+  // so a timeout — not rAF — clears the flag after the observer has seen it
+  setTimeout(()=>{ta._prog=false},0);
+}
+const sized=c=>HEIGHT[c.id]||c.height;
+function fitAll(){ DOC.chunks.forEach(c=>{ if(!sized(c)) autosize(c.id); }); }
+
 // A rebuild of the card list would drop an inline height, so remember it and
 // put it back — and persist it so it survives a reload too.
 function watchHeights(){
@@ -267,29 +415,178 @@ function watchHeights(){
   DOC.chunks.forEach(c=>{
     const ta=$('t'+c.id); if(!ta) return;
     let saved=HEIGHT[c.id]||c.height||0;
-    new ResizeObserver(es=>{
-      const h=Math.round(es[0].contentRect.height);
+    new ResizeObserver(()=>{
+      // offsetHeight, not contentRect: contentRect is the *content* box, but
+      // `*{box-sizing:border-box}` means style.height sets the *border* box.
+      // Storing one and applying the other lost the 18px of padding on every
+      // round trip, so a card at the 62px default came back as 44px and
+      // clipped a line more each time it was saved and reloaded.
+      const h=ta.offsetHeight;
       if(!h || Math.abs(h-saved)<4) return;
-      saved=h; HEIGHT[c.id]=h;
+      saved=h;
+      if(ta._prog) return;             // fitting the text is not a resize to store
+      HEIGHT[c.id]=h;
       clearTimeout(ta._t);
       ta._t=setTimeout(()=>api('/api/chunk',{name:DOC.name,id:c.id,height:h}),700);
     }).observe(ta);
   });
 }
+function renderFR(){
+  const b=$('frbar'); b.hidden=!DOC; if(!DOC)return;
+  if(b.dataset.built)return; b.dataset.built='1';
+  b.innerHTML=`<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+    <input id="frFind" placeholder="find" style="flex:1;min-width:120px">
+    <input id="frRepl" placeholder="replace with" style="flex:1;min-width:120px">
+    <label class="mut" style="font-size:11px"><input type="checkbox" id="frWhole" checked> whole word</label>
+    <label class="mut" style="font-size:11px"><input type="checkbox" id="frCase"> match case</label>
+    <label class="mut" style="font-size:11px"><input type="checkbox" id="frRe"> regex</label>
+    <button onclick="frFindAll()">find</button>
+    <button class="pri" id="frGo" onclick="frApply()" disabled>replace all</button>
+    <span class="mut" id="frMsg" style="font-size:11.5px"></span>
+  </div><div id="frHits" style="margin-top:6px;font-size:11.5px;max-height:150px;overflow-y:auto"></div>`;
+}
+function frBody(dry){ return {name:DOC.name, find:$('frFind').value, replace:$('frRepl').value,
+  whole:$('frWhole').checked, case:$('frCase').checked, regex:$('frRe').checked, dry_run:dry}; }
+async function frFindAll(){
+  const r=await api('/api/replace', frBody(true));
+  if(r.error){ $('frMsg').textContent=r.error; $('frGo').disabled=true; return; }
+  const mins=Math.round(r.resec/60);
+  $('frMsg').innerHTML = r.cards
+    ? `${r.matches} match(es) in ${r.cards} card(s)` +
+      (r.stale ? ` &middot; <span class="warn">${r.stale} already rendered — replacing costs ~${mins||1} min to re-render</span>` : '')
+    : 'no matches';
+  $('frGo').disabled = !r.cards;
+  $('frHits').innerHTML = r.hits.map(h=>
+    `<div style="border-bottom:1px solid var(--line);padding:3px 0">
+       <a href="#c${h.id}" style="color:var(--amber)">#${h.id}</a>
+       ${h.was_ready?'<span class="pill warn">rendered</span>':''}
+       <div class="mut">${esc(h.before)}</div>
+       <div style="color:var(--green)">${esc(h.after)}</div></div>`).join('');
+}
+async function frApply(){
+  await flushAll();          // replace rewrites the stored text of every hit
+  const r=await api('/api/replace', frBody(false));
+  $('frMsg').textContent = `replaced in ${r.cards} card(s) — ⌘Z to undo`;
+  $('frHits').innerHTML=''; $('frGo').disabled=true;
+  open_(DOC.name,true);
+}
 function pick(id,on){on?SEL.add(id):SEL.delete(id);
   $('chatnote').textContent=SEL.size?SEL.size+' chunk(s) as context':''; }
-async function saveText(id){
-  await api('/api/chunk',{name:DOC.name,id,text:$('t'+id).value});
-  await open_(DOC.name,true); $('s'+id).textContent='edited — needs re-render'; }
+// ── editing ───────────────────────────────────────────────
+// Typing marks the card stale on the spot and saves shortly after. It used to
+// save on `change`, which fires on blur — so pressing render *was* the blur:
+// the save fired first, rebuilt the card list, and destroyed the button the
+// click was still travelling towards. The press hit nothing, and the only
+// visible effect was the note the save left behind. Hence two clicks.
+let SAVET={}, SAVING={}, DIRTY=new Set();
+
+function touched(id){
+  DIRTY.add(id);
+  // Say so immediately rather than after a round trip: the card is stale the
+  // moment the text differs, whatever the server has caught up with.
+  const dot=document.querySelector('#c'+id+' .dot');
+  if(dot && !dot.classList.contains('mute')){ dot.classList.remove('ready'); dot.classList.add('stale'); }
+  const pf=$('pf'+id); if(pf) pf.disabled=true;      // that audio is the old text now
+  const s=$('s'+id); if(s) s.textContent='edited — needs re-render';
+  const n=document.querySelector('#c'+id+' .chars');
+  if(n) n.textContent=$('t'+id).value.length+' ch';
+  const c=DOC&&DOC.chunks.find(x=>x.id===id);
+  if(c&&!sized(c)) autosize(id);        // grow with the text unless it was dragged
+  clearTimeout(SAVET[id]);
+  SAVET[id]=setTimeout(()=>flush(id),700);
+}
+// Saves for one card run in series. Two overlapping POSTs can land in either
+// order, and the loser would put the older text back.
+function queueSave(id){
+  const run=async()=>{
+    if(!DIRTY.has(id))return;
+    DIRTY.delete(id);
+    await api('/api/chunk',{name:DOC.name,id,text:$('t'+id).value});
+    await syncCards();
+  };
+  SAVING[id]=(SAVING[id]||Promise.resolve()).then(run,run);
+  return SAVING[id];
+}
+async function flush(id){
+  clearTimeout(SAVET[id]); delete SAVET[id];
+  await queueSave(id);
+}
+// Anything that rebuilds the card list, renumbers ids or moves to another
+// document has to bank the pending edits first. Saving on blur used to do this
+// by accident; a debounce means it has to be asked for.
+const flushAll=()=>Promise.all([...DIRTY].map(flush));
+
+// Update what the server derives — hash, ready, effective params — by patching
+// the cards in place. renderDoc() replaces every card's HTML, which drops
+// focus, loses the caret and throws away whatever the mouse was about to hit,
+// so it is now kept for changes that actually alter the list: split, merge,
+// duplicate, remove, undo.
+async function syncCards(){
+  if(!DOC)return;
+  const fresh=await api('/api/doc?name='+encodeURIComponent(DOC.name));
+  if(!fresh||fresh.error)return;
+  if(fresh.chunks.length!==DOC.chunks.length)return void open_(DOC.name,true);
+  DOC=fresh;
+  for(const c of DOC.chunks){
+    const card=$('c'+c.id); if(!card)continue;
+    const dot=card.querySelector('.dot');
+    if(dot)dot.className='dot '+(c.mute?'':(c.ready?'ready':'stale'));
+    const ta=$('t'+c.id);
+    // never overwrite an edit that has not reached the server yet — this runs
+    // while a bake is going, and typing in one card must survive another
+    // card finishing
+    if(ta&&document.activeElement!==ta&&!DIRTY.has(c.id)&&!SAVING[c.id]&&ta.value!==c.text){
+      ta.value=c.text;
+      if(!sized(c)) autosize(c.id);     // normalise() may have changed its length
+    }
+    const n=card.querySelector('.chars'); if(n)n.textContent=c.text.length+' ch';
+    const pf=$('pf'+c.id); if(pf)pf.disabled=!(c.ready&&!c.mute);
+    const pp=$('pp'+c.id); if(pp)pp.disabled=!(PREV[c.id]&&!c.mute);
+    syncPrevBtn(c.id);
+  }
+  const rd=DOC.chunks.filter(c=>c.ready).length;
+  $('dl').hidden=rd<DOC.chunks.length;
+  $('hdr').textContent=DOC.title+' · '+DOC.chunks.length+' chunks';
+}
+
 async function one(id){
   const b=$('rb'+id); b.classList.add('busy'); b.textContent='rendering…';
   $('s'+id).textContent='';
-  try{
-    const r=await api('/api/render',{name:DOC.name,id,force:true});
-    JOBS[r.job]={id,kind:'render'};
-    $('s'+id).textContent='queued — carry on, it renders in the background';
-    pollJobs();
-  }finally{} }
+  // speak what is on screen, not what the server last heard about
+  await flush(id);
+  const r=await api('/api/render',{name:DOC.name,id,force:true});
+  if(r.error){ fail(id,r.error); return; }
+  JOBS[r.job]={id,kind:'render'};
+  $('s'+id).textContent='queued — carry on, it renders in the background';
+  pollJobs(); }
+
+// Render failures used to be written into the card and then wiped a moment
+// later by the refresh that followed, which is no way to learn that torchaudio
+// is missing. They stay put now, and also go to the footer, which is visible
+// wherever you have scrolled to.
+function fail(id,msg){
+  const b=$('rb'+id); if(b){ b.classList.remove('busy'); b.textContent='render'; }
+  const s=$('s'+id);
+  if(s)s.innerHTML=`<span style="color:var(--red)">${esc(msg)}</span>`;
+  $('status').innerHTML=`<span style="color:var(--red)">card #${id}: ${esc(msg)}</span>`;
+}
+
+// "preview selected" only means something with a selection, so the button says
+// so by being dead until there is one. selectionchange covers every way of
+// making one — dragging, shift-arrows, double-click, ⌘A.
+function selectedIn(id){
+  const ta=$('t'+id); if(!ta)return '';
+  return ta.value.slice(ta.selectionStart,ta.selectionEnd).trim();
+}
+function syncPrevBtn(id){
+  const b=$('pv'+id); if(!b||b.classList.contains('busy'))return;
+  const c=DOC&&DOC.chunks.find(x=>x.id===id);
+  b.disabled=!selectedIn(id)||!!(c&&c.mute);
+}
+document.addEventListener('selectionchange',()=>{
+  const el=document.activeElement;
+  if(el&&el.tagName==='TEXTAREA'&&/^t\d+$/.test(el.id)) syncPrevBtn(+el.id.slice(1));
+});
 
 async function prev(id){
   const ta=$('t'+id);
@@ -305,7 +602,10 @@ async function prev(id){
   $('s'+id).textContent=''; keep();
   try{
     const r=await api('/api/preview',{name:DOC.name,id,force:true,text:sel});
-    if(r.error){ $('s'+id).textContent=r.error; return; }
+    // without this the button sits on "previewing…" for ever: nothing was
+    // queued, so no poll comes along to put it back
+    if(r.error){ b.classList.remove('busy'); b.textContent='preview selected';
+                 syncPrevBtn(id); $('s'+id).textContent=r.error; return; }
     JOBS[r.job]={id,kind:'preview',play:true};
     $('s'+id).textContent='queued…';
     pollJobs();
@@ -324,18 +624,30 @@ function playPrev(id){ if(PREV[id]) playHash(PREV[id]); }
 async function splitAt(id){
   const t=$('t'+id), at=t.selectionStart;
   if(!at||at>=t.value.length)return alert('Put the cursor where it should split.');
+  // the server splits the text it holds, so it had better be the text the
+  // cursor was sitting in
+  await flush(id);
   await api('/api/split',{name:DOC.name,id,at}); open_(DOC.name,true); }
-async function merge(id){ await api('/api/merge',{name:DOC.name,id}); open_(DOC.name,true); }
-async function dup(id){ await api('/api/duplicate',{name:DOC.name,id}); open_(DOC.name,true); }
+async function merge(id){ await flushAll();
+  await api('/api/merge',{name:DOC.name,id}); open_(DOC.name,true); }
+async function dup(id){ await flushAll();
+  await api('/api/duplicate',{name:DOC.name,id}); open_(DOC.name,true); }
 async function del(id){
   const c=DOC.chunks.find(x=>x.id===id);
   if(!confirm(`Remove card #${id}?\n\n${c.text.slice(0,90)}…`))return;
+  await flushAll();
   await api('/api/remove',{name:DOC.name,id}); open_(DOC.name,true); }
-async function mute(id,on){ await api('/api/chunk',{name:DOC.name,id,mute:on}); open_(DOC.name,true); }
-async function setProfile(id,p){ await api('/api/chunk',{name:DOC.name,id,profile:p}); open_(DOC.name,true); }
+async function mute(id,on){ await flushAll();
+  await api('/api/chunk',{name:DOC.name,id,mute:on}); open_(DOC.name,true); }
+async function setProfile(id,p){ await api('/api/chunk',{name:DOC.name,id,profile:p}); await syncCards(); }
 
 // ── bake / assemble ───────────────────────────────────────
 async function bake(){ if(!DOC)return; await api('/api/bake',{name:DOC.name}); refresh(); }
+async function stopBake(){
+  const b=$('stopb'); b.disabled=true; b.textContent='stopping…';
+  await api('/api/bake_stop',{});
+  refresh();
+}
 async function assemble(){
   if(!DOC)return;
   $('status').textContent='assembling…';
@@ -359,6 +671,7 @@ $('ask').addEventListener('keydown',e=>{if(e.key==='Enter'&&(e.metaKey||e.ctrlKe
 
 async function undo(){
   if(!DOC)return;
+  await flushAll();          // or the pending edit lands on top of the undo
   const r=await api('/api/undo',{name:DOC.name});
   $('status').textContent = r.ok ? `undid: ${r.undone} (${r.left} left)` : 'nothing to undo';
   if(r.ok) open_(DOC.name,true);
@@ -386,7 +699,7 @@ async function pollJobs(){
     }else if(mine){
       delete JOBS[j.id]; changed=true;
       const s=$('s'+j.chunk);
-      if(j.status==='error'){ if(s)s.textContent=j.error; }
+      if(j.status==='error'){ fail(j.chunk,j.error); }
       else{
         if(j.kind==='preview'){ PREV[j.chunk]=j.hash;
           if(s)s.textContent=`previewed ${j.chars} of ${j.of} chars · ${j.seconds}s`;
@@ -399,10 +712,13 @@ async function pollJobs(){
   document.querySelectorAll('button.busy').forEach(b=>{
     const id=parseInt(b.id.slice(2),10);
     if(!active.has(id)){ b.classList.remove('busy');
-      b.textContent = b.id.startsWith('pv') ? 'preview selection' : 'render'; }
+      if(b.id.startsWith('pv')){ b.textContent='preview selected'; syncPrevBtn(id); }
+      else b.textContent='render'; }
   });
   $('busy').textContent = st.busy ? `${st.busy} rendering` : '';
-  if(changed && DOC) open_(DOC.name,true);
+  // patch, do not rebuild: this fires while you are typing, and it must not
+  // erase the message it just wrote about why a render failed
+  if(changed && DOC) await syncCards();
   if(st.busy) POLL=setTimeout(pollJobs,1500);
 }
 pollJobs();
