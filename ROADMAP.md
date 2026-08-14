@@ -54,47 +54,41 @@ making her type a path.
 Worth pairing with **export stems** — one file per card, numbered in order —
 since that is what an editor actually wants for a real mix.
 
-## 4. Sound-effect cards  ← the big one
+## 4. Sound-effect cards — **done, 2026-08-14** (as audio + silence cards)
 
-**What:** import an audio clip as a new kind of card, with two behaviours:
+Built, with the model the sketch predicted — assemble() is now a timeline mix,
+not a concatenation — but simpler fields than proposed, matching how it is
+actually used:
 
-- **play to completion** — sequential; narration waits for it.
-- **render beneath** — the effect plays *under* the following narration.
-
-**Why this is the largest change:** the document is currently a *list* that
-concatenates. "Underneath" makes it a *timeline* with overlapping regions, and
-assemble() stops being concatenation and becomes a mix. That is a real model
-change, so it deserves its own pass rather than being bolted on.
-
-Suggested card fields:
-
-```
-kind: "sfx"
-file: studio/<project>/sfx/rain.wav
-mode: "sequential" | "under"
-under_span: 3          # how many following cards it plays beneath
-gain_db: -12           # effects almost always want to sit well below voice
-fade_in / fade_out: 0.5
-loop: false            # for beds shorter than the span
-```
-
-**Can it do the mix? Yes** — `ffmpeg -filter_complex amix`/`adelay` handles
-overlay, gain and fades, and ffmpeg is already a dependency. The hard part is
-never ffmpeg; it is deciding the timeline model and keeping content-addressed
-caching correct once regions overlap. The mix output needs its own hash, keyed
-on every contributing region, or stale mixes will be served.
-
-**Keep the invariant:** narration chunks stay individually cached. Only the
-mixdown is recomputed when an effect moves.
+- **`mode: "full" | "after"`** replaced `under_span`. Counting *cards* to play
+  beneath was the wrong unit: what you actually know is "let the intro breathe
+  for 6 seconds, then start talking". `after: N` advances the timeline cursor
+  N seconds into the clip and everything that follows mixes over the rest.
+- **Fades are percentages of the clip, one two-handled slider** — [10, 90]
+  means ramp in over the first 10% and out over the last 10% — rather than
+  absolute seconds. Volume is a plain 0–100 slider, not dB.
+- **Clips are global** (`studio/clips/`, like voices), not per-project sfx
+  dirs: the same intro music opens every episode. ffmpeg converts whatever is
+  imported to PCM wav on the way in, so assemble never meets a codec.
+- **Silence cards** came along for free: a timed cursor advance that places
+  nothing.
+- **No mix cache.** The suggested "hash the mixdown" was dropped: assemble is
+  seconds of tensor math even for a full episode, so caching it buys nothing
+  and risks staleness. Speech chunks stay individually content-addressed;
+  the invariant holds.
+- With it came the missing structural editing: an insert strip between every
+  pair of cards, and drag-to-reorder by a ⠿ grip, both snapshotted for undo.
+  Backups carry clips with the same never-overwrite reconciliation as voices —
+  a clip name is not part of any chunk hash, so a rename on import costs only
+  the pointer.
 
 ## 5. Render selected
 
-**What:** select a run of cards and render them as one unit — necessary once
-an effect plays beneath the two cards after it, since those three are no
-longer independent.
+**What:** select a run of cards and render them as one unit.
 
-Depends on #4. Until effects exist, per-card rendering is strictly better:
-smaller units mean less re-rendering when one line is wrong.
+With #4 built, per-card caching still holds (the mix is cheap and uncached),
+so this is now purely a convenience — export a stretch of the timeline to
+audition, rather than a correctness need.
 
 Selection UI already half-exists — the "discuss" checkboxes could become a
 general selection used by both the chat context and this.

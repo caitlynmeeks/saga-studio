@@ -64,6 +64,35 @@ input[type=number]{width:62px}
 .pill{font-size:10.5px;border:1px solid var(--line);border-radius:99px;padding:1px 7px;color:var(--faint)}
 button.tiny{padding:0 5px;font-size:12px;line-height:17px;border-color:transparent;color:var(--faint)}
 .proj:hover button.tiny{border-color:var(--line)}
+/* The stack: cards no longer carry their own bottom margin — the insert strip
+   between them does, so "between two cards" is a real place you can point at,
+   both to insert and to drop a dragged card. */
+.chunk{margin-bottom:0}
+.ins{height:20px;display:flex;align-items:center;gap:5px;justify-content:center;
+opacity:0;transition:opacity .15s}
+.ins:hover,.ins.hot{opacity:1}
+.ins::before,.ins::after{content:'';flex:1;height:1px;background:var(--line)}
+.ins button{padding:0 7px;font-size:10.5px;line-height:16px;color:var(--dim)}
+.grip{cursor:grab;color:var(--faint);user-select:none;flex:none}
+.grip:active{cursor:grabbing}
+.chunk.dropb{box-shadow:0 -3px 0 var(--green)}
+.chunk.dropa{box-shadow:0 3px 0 var(--green)}
+/* audio & silence cards */
+.arow{display:flex;gap:8px;align-items:center;padding:6px 9px;flex-wrap:wrap;font-size:12px}
+.arow .lbl{font-size:11px;color:var(--dim);width:46px;flex:none}
+input[type=range]{border:0;background:none;padding:0;accent-color:var(--green)}
+/* two native sliders stacked = one dual-handle range: the inputs ignore the
+   pointer, only their thumbs take it, and a fill bar shows the kept span */
+.dual{position:relative;height:22px;flex:1;min-width:150px}
+.dual .rail{position:absolute;top:10px;left:0;right:0;height:3px;background:var(--line);border-radius:2px}
+.dual .fill{position:absolute;top:10px;height:3px;background:var(--green);opacity:.55;border-radius:2px}
+.dual input[type=range]{position:absolute;left:0;top:0;width:100%;height:22px;margin:0;
+-webkit-appearance:none;appearance:none;pointer-events:none}
+.dual input[type=range]::-webkit-slider-runnable-track{background:transparent;height:22px}
+.dual input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;pointer-events:auto;
+width:13px;height:13px;border-radius:50%;background:var(--green);border:none;margin-top:4px;cursor:ew-resize}
+.dual input[type=range]::-moz-range-thumb{pointer-events:auto;width:13px;height:13px;
+border-radius:50%;background:var(--green);border:none;cursor:ew-resize}
 </style>
 </head>
 <body>
@@ -96,6 +125,7 @@ button.tiny{padding:0 5px;font-size:12px;line-height:17px;border-color:transpare
     <button onclick="$('arch').click()">import…</button>
   </div>
   <input type="file" id="arch" accept=".sagaproj" hidden>
+  <input type="file" id="clipfile" accept="audio/*,.mp3,.wav,.flac,.m4a,.ogg,.aif,.aiff" hidden>
   <div id="bkmsg" class="mut" style="font-size:11px;margin-top:6px"></div>
 
   <h2 style="margin-top:18px">voice profiles</h2>
@@ -127,6 +157,8 @@ Selected chunks are sent as context.</div></div>
   <button id="undob" onclick="undo()" title="⌘Z">undo</button>
   <button class="pri" id="bakeb" onclick="bake()">bake all stale</button>
   <button id="stopb" onclick="stopBake()" style="color:var(--red);border-color:var(--red)" hidden>stop</button>
+  <button id="pvbook" onclick="previewBook()"
+    title="mix and play the whole book right here, without exporting the mp3">▶ preview audiobook</button>
   <button onclick="assemble()">assemble audiobook</button>
   <span class="mut" id="status"></span>
   <span style="flex:1"></span>
@@ -200,12 +232,16 @@ async function doExport(qs){
   const rendered=plan.projects.reduce((a,p)=>a+p.rendered,0);
   // The download only begins once the server has packed the whole archive, so
   // say what is happening rather than sitting there looking broken.
+  const nclips=Object.keys(plan.clips||{}).length;
   m.innerHTML=`packing ${plan.projects.length} episode(s), ${rendered} rendered chunk(s), `+
-    `${Object.keys(plan.voices).length} voice(s) — about <b>${size(plan.bytes)}</b>.<br>`+
+    `${Object.keys(plan.voices).length} voice(s)`+
+    (nclips?`, ${nclips} audio clip(s)`:'')+
+    ` — about <b>${size(plan.bytes)}</b>.<br>`+
     `<span class="mut">your browser saves it when it is ready`+
     (plan.bytes>2e8?' — a minute or so at this size':'')+`</span>`+
     (plan.unreadable.length?`<br><span class="warn">left out, unreadable: ${plan.unreadable.map(esc).join(', ')}</span>`:'')+
-    (plan.missing_voices.length?`<br><span class="warn">voice clip missing from disk, so not in the backup: ${plan.missing_voices.map(esc).join(', ')}</span>`:'');
+    (plan.missing_voices.length?`<br><span class="warn">voice clip missing from disk, so not in the backup: ${plan.missing_voices.map(esc).join(', ')}</span>`:'')+
+    ((plan.missing_clips||[]).length?`<br><span class="warn">audio clip missing from disk, so not in the backup: ${plan.missing_clips.map(esc).join(', ')}</span>`:'');
   window.location='/api/export?'+q;
 }
 
@@ -226,7 +262,7 @@ async function importArchive(f){
   if(j.skipped.length) bits.push(`${j.skipped.length} already here, left alone`);
   // Renames are the one thing worth reading: they mean a name collided and the
   // incoming copy landed beside yours rather than over it.
-  const notes=[...j.voices,...j.profiles];
+  const notes=[...j.voices,...j.profiles,...(j.clips||[])];
   m.innerHTML=`<span class="ok">${bits.join(' · ')}</span>`+
     (notes.length?`<div class="warn" style="margin-top:5px">${notes.map(esc).join('<br>')}</div>`:'');
   await refresh();
@@ -361,10 +397,29 @@ function bindVoiceDrop(){
 }
 
 // ── chunks ────────────────────────────────────────────────
+// Three kinds of card share the stack: speech (the original), an audio clip,
+// and a timed silence. Insert strips sit between every pair of cards — and at
+// both ends — so a new card can be born exactly where it belongs.
 function renderDoc(){
-  $('main').innerHTML=DOC.chunks.map(c=>`
+  $('main').innerHTML=insBar(0)+DOC.chunks.map(c=>cardHTML(c)+insBar(c.id+1)).join('');
+  DOC.chunks.forEach(c=>{ if(c.type==='audio')fadeUi(c.id); });
+  bindDrag();
+}
+function cardHTML(c){
+  return c.type==='audio'?audioCard(c):c.type==='silence'?silenceCard(c):speechCard(c);
+}
+const insBar=at=>`<div class="ins">
+    <button onclick="insertCard(${at},'speech')" title="insert an empty text card here">+ text</button>
+    <button onclick="insertCard(${at},'audio')" title="insert a music / sound-effect card here">+ ♪ audio</button>
+    <button onclick="insertCard(${at},'silence')" title="insert a timed pause here">+ silence</button>
+  </div>`;
+const grip=id=>`<span class="grip" draggable="true" ondragstart="dragStart(event,${id})"
+  ondragend="dragEnd()" title="drag to move this card">⠿</span>`;
+
+function speechCard(c){return `
    <div class="chunk ${SEL.has(c.id)?'sel':''}" id="c${c.id}" style="${c.mute?'opacity:.45':''}">
     <div class="top">
+      ${grip(c.id)}
       <span class="dot ${c.mute?'':(c.ready?'ready':'stale')}"></span>
       <span>#${c.id}</span>
       <span class="mut chars">${c.text.length} ch</span>
@@ -390,7 +445,84 @@ function renderDoc(){
       <button onclick="del(${c.id})" style="color:var(--red)">remove</button>
       <span class="mut" id="s${c.id}" style="font-size:11px"></span>
     </div>
-   </div>`).join('');
+   </div>`;
+}
+
+function audioCard(c){
+  const clips=STATE.clips||[], cur=clips.find(k=>k.name===c.clip);
+  const len=c.cliplen||(cur&&cur.secs)||0;
+  const fade=c.fade||[0,100], g=c.gain==null?100:c.gain, after=c.after==null?5:c.after;
+  return `
+   <div class="chunk" id="c${c.id}" style="${c.mute?'opacity:.45':''}">
+    <div class="top">
+      ${grip(c.id)}
+      <span class="dot ${c.mute?'':(c.ready?'ready':'stale')}"></span>
+      <span>#${c.id}</span>
+      <span class="pill">♪ audio</span>
+      <span class="mut">${c.clip?esc(c.clip)+(len?' · '+fmtSecs(len):''):'no clip chosen'}</span>
+      ${c.mute?'<span class="pill warn">muted</span>':''}
+      <span style="flex:1"></span>
+    </div>
+    <div class="arow">
+      <select onchange="setCard(${c.id},{clip:this.value},true)" style="max-width:230px">
+        <option value="">choose a clip…</option>
+        ${clips.map(k=>`<option value="${esc(k.name)}" ${k.name===c.clip?'selected':''}>${esc(k.name)} (${fmtSecs(k.secs)})</option>`).join('')}
+      </select>
+      <button onclick="pickClip(${c.id})">import a file…</button>
+      <button id="pc${c.id}" onclick="playClip(${c.id})" ${c.ready&&!c.mute?'':'disabled'}>▶ play</button>
+    </div>
+    <div class="arow">
+      <span class="lbl">then</span>
+      <label class="mut"><input type="radio" name="md${c.id}" ${c.mode!=='after'?'checked':''}
+        onchange="setCard(${c.id},{mode:'full'})"> play it all, then the next card</label>
+      <label class="mut"><input type="radio" name="md${c.id}" ${c.mode==='after'?'checked':''}
+        onchange="setCard(${c.id},{mode:'after'})"> next card after
+        <input type="number" step="0.5" min="0" value="${after}" style="width:56px"
+          onchange="setCard(${c.id},{mode:'after',after:parseFloat(this.value)||0})"> s
+        <span class="mut" style="font-size:11px">— the rest plays under what follows</span></label>
+    </div>
+    <div class="arow">
+      <span class="lbl">fade</span>
+      <div class="dual">
+        <div class="rail"></div><div class="fill" id="ff${c.id}"></div>
+        <input type="range" min="0" max="100" value="${fade[0]}" id="flo${c.id}"
+          oninput="fadeUi(${c.id})" onchange="fadeSave(${c.id})">
+        <input type="range" min="0" max="100" value="${fade[1]}" id="fhi${c.id}"
+          oninput="fadeUi(${c.id})" onchange="fadeSave(${c.id})">
+      </div>
+      <span class="mut" id="flab${c.id}" style="font-size:11px;min-width:110px"></span>
+    </div>
+    <div class="arow">
+      <span class="lbl">volume</span>
+      <input type="range" min="0" max="100" value="${g}" style="flex:1"
+        oninput="$('glab${c.id}').textContent=this.value+'%'"
+        onchange="setCard(${c.id},{gain:parseFloat(this.value)})">
+      <span class="mut" id="glab${c.id}" style="font-size:11px;min-width:36px">${g}%</span>
+    </div>
+    <div class="act">
+      <button onclick="mute(${c.id},${!c.mute})">${c.mute?'unmute':'mute'}</button>
+      <button onclick="del(${c.id})" style="color:var(--red)">remove</button>
+      <span class="mut" id="s${c.id}" style="font-size:11px"></span>
+    </div>
+   </div>`;
+}
+
+function silenceCard(c){return `
+   <div class="chunk" id="c${c.id}" style="${c.mute?'opacity:.45':''}">
+    <div class="top" style="border-bottom:0">
+      ${grip(c.id)}
+      <span class="dot ready"></span>
+      <span>#${c.id}</span>
+      <span class="pill">— silence</span>
+      <input type="number" step="0.1" min="0" value="${c.secs==null?1:c.secs}" style="width:62px"
+        onchange="setCard(${c.id},{secs:parseFloat(this.value)||0})">
+      <span class="mut" style="font-size:11px">seconds of rest</span>
+      ${c.mute?'<span class="pill warn">muted</span>':''}
+      <span style="flex:1"></span>
+      <button class="tiny" onclick="mute(${c.id},${!c.mute})">${c.mute?'unmute':'mute'}</button>
+      <button class="tiny" onclick="del(${c.id})" style="color:var(--red)" title="remove">×</button>
+    </div>
+   </div>`;
 }
 // Cards fit their text by default — no card should hide a line you are trying
 // to read. Dragging the corner sets an explicit height, which then wins in
@@ -542,6 +674,7 @@ async function syncCards(){
     const n=card.querySelector('.chars'); if(n)n.textContent=c.text.length+' ch';
     const pf=$('pf'+c.id); if(pf)pf.disabled=!(c.ready&&!c.mute);
     const pp=$('pp'+c.id); if(pp)pp.disabled=!(PREV[c.id]&&!c.mute);
+    const pc=$('pc'+c.id); if(pc)pc.disabled=!(c.ready&&!c.mute);
     syncPrevBtn(c.id);
   }
   const rd=DOC.chunks.filter(c=>c.ready).length;
@@ -634,12 +767,117 @@ async function dup(id){ await flushAll();
   await api('/api/duplicate',{name:DOC.name,id}); open_(DOC.name,true); }
 async function del(id){
   const c=DOC.chunks.find(x=>x.id===id);
-  if(!confirm(`Remove card #${id}?\n\n${c.text.slice(0,90)}…`))return;
+  const what=c.type==='audio'?`♪ audio card — ${c.clip||'no clip chosen'}`
+    :c.type==='silence'?`${c.secs==null?1:c.secs}s of silence`
+    :c.text.slice(0,90)+'…';
+  if(!confirm(`Remove card #${id}?\n\n${what}`))return;
   await flushAll();
   await api('/api/remove',{name:DOC.name,id}); open_(DOC.name,true); }
 async function mute(id,on){ await flushAll();
   await api('/api/chunk',{name:DOC.name,id,mute:on}); open_(DOC.name,true); }
 async function setProfile(id,p){ await api('/api/chunk',{name:DOC.name,id,profile:p}); await syncCards(); }
+
+// ── audio & silence cards ─────────────────────────────────
+const fmtSecs=s=>s>=60?`${Math.floor(s/60)}:${String(Math.round(s%60)).padStart(2,'0')}`
+  :`${Math.round(s*10)/10}s`;
+// rebuild=true for edits that change what the card header says (the clip
+// name); sliders and radios keep their own DOM, so a sync is enough and the
+// control never vanishes mid-drag
+async function setCard(id,patch,rebuild){
+  await api('/api/chunk',{name:DOC.name,id,...patch});
+  if(rebuild)open_(DOC.name,true); else await syncCards();
+}
+function fadeUi(id){
+  const lo=$('flo'+id), hi=$('fhi'+id); if(!lo||!hi)return;
+  let a=+lo.value, b=+hi.value;
+  if(a>b){ a=b; lo.value=a; }        // the thumbs push each other, never cross
+  const f=$('ff'+id);
+  if(f){ f.style.left=a+'%'; f.style.width=(b-a)+'%'; }
+  const l=$('flab'+id);
+  if(l)l.textContent=(a?`fade in ${a}%`:'no fade in')+' · '+(b<100?`fade out ${100-b}%`:'no fade out');
+}
+function fadeSave(id){ fadeUi(id); setCard(id,{fade:[+$('flo'+id).value,+$('fhi'+id).value]}); }
+
+let CLIPTARGET=null;
+function pickClip(id){ CLIPTARGET=id; $('clipfile').click(); }
+$('clipfile').onchange=async e=>{
+  const f=e.target.files[0]; e.target.value='';
+  if(!f||CLIPTARGET==null)return;
+  const id=CLIPTARGET; CLIPTARGET=null;
+  $('status').textContent=`importing ${f.name}…`;
+  let j;
+  try{
+    const r=await fetch('/api/clip/upload?fn='+encodeURIComponent(f.name),
+      {method:'POST',body:f,headers:{'Content-Type':'application/octet-stream'}});
+    j=await r.json();
+  }catch(ex){ j={error:String(ex)}; }
+  if(j.error) return void($('status').innerHTML=`<span class="warn">${esc(j.error)}</span>`);
+  $('status').textContent=`clip “${j.clip}” imported · ${fmtSecs(j.secs)}`;
+  await api('/api/chunk',{name:DOC.name,id,clip:j.clip});
+  await refresh(); open_(DOC.name,true);
+};
+function playClip(id){
+  const c=DOC.chunks.find(x=>x.id===id); if(!c||!c.clip)return;
+  if(AUDIO){ AUDIO.pause(); AUDIO.currentTime=0; }
+  AUDIO=new Audio('/api/clip?f='+encodeURIComponent(c.clip));
+  AUDIO.volume=Math.min(1,(c.gain==null?100:c.gain)/100);   // fades are a render-time thing
+  AUDIO.play();
+}
+
+// ── insert & reorder ──────────────────────────────────────
+// Both renumber every card, so the per-id caches (dragged heights, previews)
+// would land on the wrong cards — throw them away and let the server's copy,
+// which travels with the card, repopulate.
+async function insertCard(at,kind){
+  await flushAll();
+  await api('/api/insert',{name:DOC.name,at,kind});
+  HEIGHT={}; PREV={};
+  open_(DOC.name,true);
+}
+let DRAGID=null;
+function dragStart(e,id){
+  DRAGID=id;
+  e.dataTransfer.effectAllowed='move';
+  try{ e.dataTransfer.setData('text/plain',String(id)); }catch(_){}
+  const card=$('c'+id); if(card)e.dataTransfer.setDragImage(card,30,14);
+}
+function dragEnd(){ DRAGID=null; clearMarks(); }
+function clearMarks(){ document.querySelectorAll('.dropa,.dropb,.ins.hot')
+  .forEach(el=>el.classList.remove('dropa','dropb','hot')); }
+function bindDrag(){
+  document.querySelectorAll('#main .chunk').forEach(el=>{
+    el.addEventListener('dragover',e=>{
+      if(DRAGID==null)return; e.preventDefault(); e.dataTransfer.dropEffect='move';
+      const r=el.getBoundingClientRect(), before=e.clientY<r.top+r.height/2;
+      clearMarks(); el.classList.add(before?'dropb':'dropa');
+    });
+    el.addEventListener('drop',e=>{
+      if(DRAGID==null)return; e.preventDefault();
+      const r=el.getBoundingClientRect(), before=e.clientY<r.top+r.height/2;
+      moveCard(DRAGID,(+el.id.slice(1))+(before?0:1));
+    });
+  });
+  // the gap between two cards is exactly where a drop aims, so the insert
+  // strips take one too — the Nth strip is slot N
+  document.querySelectorAll('#main .ins').forEach((el,at)=>{
+    el.addEventListener('dragover',e=>{
+      if(DRAGID==null)return; e.preventDefault(); e.dataTransfer.dropEffect='move';
+      clearMarks(); el.classList.add('hot');
+    });
+    el.addEventListener('drop',e=>{
+      if(DRAGID==null)return; e.preventDefault();
+      moveCard(DRAGID,at);
+    });
+  });
+}
+async function moveCard(id,to){
+  DRAGID=null; clearMarks();
+  if(to===id||to===id+1)return;      // dropped back where it already was
+  await flushAll();
+  await api('/api/move',{name:DOC.name,id,to});
+  HEIGHT={}; PREV={};
+  open_(DOC.name,true);
+}
 
 // ── bake / assemble ───────────────────────────────────────
 async function bake(){ if(!DOC)return; await api('/api/bake',{name:DOC.name}); refresh(); }
@@ -648,6 +886,39 @@ async function stopBake(){
   await api('/api/bake_stop',{});
   refresh();
 }
+// The preview is the assemble mix played straight from the server — same
+// timeline, same fades, byte-for-byte the same math — just never written to
+// out/<name>.mp3. The button toggles, shows where it is in the book, and any
+// other play button stops it: one audio channel for the whole app.
+const fmtTime=t=>`${Math.floor(t/60)}:${String(Math.floor(t%60)).padStart(2,'0')}`;
+let BOOKPLAY=null;
+async function previewBook(){
+  if(!DOC)return void($('status').textContent='open a document first');
+  const b=$('pvbook');
+  if(BOOKPLAY){ BOOKPLAY.pause(); return; }   // the pause handler resets the button
+  b.disabled=true; b.textContent='mixing…';
+  const r=await api('/api/book_preview',{name:DOC.name});
+  b.disabled=false; b.textContent='▶ preview audiobook';
+  if(r.error||!r.ok) return void($('status').innerHTML=r.error
+    ?`<span class="warn">${esc(r.error)}</span>`
+    :'<span class="warn">nothing to preview yet</span> — render or bake some cards first');
+  $('status').innerHTML=(r.missing
+    ?`<span class="warn">${r.missing} card(s) not ready — playing without them</span> · `:'')+
+    `previewing ${fmtTime(r.secs)} of audiobook`;
+  if(AUDIO){ AUDIO.pause(); AUDIO.currentTime=0; }
+  const a=new Audio('/api/book_audio?name='+encodeURIComponent(DOC.name)+'&t='+Date.now());
+  AUDIO=a; BOOKPLAY=a;
+  const done=()=>{ if(BOOKPLAY===a){ BOOKPLAY=null; b.textContent='▶ preview audiobook'; } };
+  a.addEventListener('pause',done);
+  a.addEventListener('ended',done);
+  a.addEventListener('error',()=>{ done(); $('status').innerHTML=
+    '<span class="warn">could not play the preview</span>'; });
+  a.addEventListener('timeupdate',()=>{ if(BOOKPLAY===a)
+    b.textContent=`■ ${fmtTime(a.currentTime)} / ${fmtTime(r.secs)}`; });
+  a.play();
+  b.textContent='■ 0:00 / '+fmtTime(r.secs);
+}
+
 async function assemble(){
   if(!DOC)return;
   $('status').textContent='assembling…';

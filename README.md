@@ -47,6 +47,18 @@ Only the first **6 seconds** shape cadence and the first **10** shape timbre
   stored untouched and never modified.
 - **Cards** are editable chunks. Edit the text and the dot turns amber — that
   card, and only that card, needs re-rendering.
+- **♪ Audio cards** put music or a sound effect in the stack. Pick a clip or
+  import one — anything ffmpeg can read. Choose what happens next: *play it
+  all, then the next card*, or *next card after N seconds* — the rest of the
+  clip keeps playing **under** the narration that follows, which is how an
+  intro fades out beneath the first spoken line. A two-handled fade slider
+  sets ramp-in/ramp-out as percentages of the clip, and a volume slider sets
+  its level under the voice. Clips are global like voices: import once, use in
+  every episode.
+- **Silence cards** are a timed rest — half a second or half a minute.
+- **Insert and reorder.** Hover between any two cards for the insert strip
+  (+ text · + ♪ audio · + silence), and drag any card by its ⠿ grip to move
+  it. Both are undoable.
 - **Voice profiles** are reusable objects: a set of voice clips plus delivery
   parameters, with a note about when to use it. Make a flat one for a character
   reading a machine log and a warm one for the same character in conversation,
@@ -61,8 +73,11 @@ Only the first **6 seconds** shape cadence and the first **10** shape timbre
 - **Renders run in the background.** Queue several, switch documents, close the
   tab — they keep going.
 - **Undo** is 25 deep and covers edits, split, merge, duplicate and remove.
-- **Bake** renders everything stale. **Assemble** stitches the book into an MP3,
-  giving `❦` scene breaks a longer rest.
+- **Bake** renders everything stale. **▶ preview audiobook** mixes the whole
+  book and plays it in place — the identical mix, nothing exported; press
+  again to stop. **Assemble** writes that mix to an MP3: cards are placed on
+  one timeline, overlapping audio is summed, and `❦` scene breaks get a
+  longer rest.
 - **Back up** with *export everything* — one `.sagaproj` file holding every
   document, the voice clips and profiles they need, and the rendered audio.
   Restore by dropping it back on the left. See below.
@@ -95,6 +110,7 @@ profiles.json              only the profiles those documents use
 projects/<name>/doc.json   cards, params, notes
 projects/<name>/source.md  the untouched import
 voices/<stem>.wav          only the clips those profiles can speak with
+clips/<name>.wav           only the music/effects those documents place
 audio/<hash>.wav           rendered chunks — optional, and nearly all the size
 ```
 
@@ -107,10 +123,10 @@ the work; the other is a backup of the hours.
 The assembled mp3 is deliberately left out: it is derived, it is large, and
 *assemble* rebuilds it in seconds from the chunks that are in there.
 
-**Nothing global is ever overwritten on import.** Voice clips and profiles are
-shared by every document, so an incoming `caitlyn2` whose bytes differ from
-yours lands beside it as `caitlyn2-imported` and only the arriving document is
-pointed at it — your other books cannot change how they sound because you
+**Nothing global is ever overwritten on import.** Voice clips, audio clips and
+profiles are shared by every document, so an incoming `caitlyn2` whose bytes
+differ from yours lands beside it as `caitlyn2-imported` and only the arriving
+document is pointed at it — your other books cannot change how they sound because you
 imported something. Renaming a voice would normally invalidate every hash that
 mentions it, so hashes are recomputed on the way in and the cached audio is
 re-filed to match; nothing needs re-rendering. Restoring onto the machine that
@@ -134,8 +150,8 @@ changing character.
 
 ## Roadmap
 
-See [ROADMAP.md](ROADMAP.md) — per-card clip export, sound-effect cards with
-mixing, external editor hand-off, and rendering a selection as one unit.
+See [ROADMAP.md](ROADMAP.md) — per-card clip export, external editor hand-off,
+and rendering a selection as one unit.
 
 ## Licence
 

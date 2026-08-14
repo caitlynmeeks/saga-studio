@@ -18,7 +18,15 @@ Layout:
     studio/<project>/doc.json        chunks, params, notes
     studio/<project>/source.md       the import, never modified
     studio/audio/<hash>.wav          shared cache; identical text is free
+    studio/clips/<name>.wav          music and sound effects, shared like voices
     studio/<project>/out/*.mp3       assembled book
+
+Cards come in three kinds. A card with no "type" is speech — the original kind,
+rendered by the model and content-addressed as above. type "audio" places an
+imported clip on the timeline (music, an effect), and type "silence" is a
+timed rest. Neither of those is rendered or hashed: their audio either exists
+in clips/ or is nothing at all, so every c["text"] / chunk_hash site guards
+with is_speech() rather than assuming the world is made of prose.
 """
 import hashlib
 import io
@@ -43,6 +51,10 @@ HERE = Path(__file__).resolve().parent
 # Point these anywhere with SAGA_DATA / SAGA_VOICES.
 ROOT = Path(os.environ.get("SAGA_DATA") or (Path.home() / ".saga-studio")).expanduser()
 AUDIO = ROOT / "audio"
+# Clips are global like voices: the same intro music recurs across episodes,
+# and cards reference a clip by name, never by path. Nothing in the app ever
+# deletes a clip file — undo can resurrect a card that points at one.
+CLIPS = ROOT / "clips"
 VOICES = Path(os.environ.get("SAGA_VOICES") or (HERE / "voices")).expanduser()
 PORT = int(os.environ.get("PORT", "5010"))
 # Localhost by default. SAGA_HOST=0.0.0.0 exposes it to the LAN — see the
@@ -56,6 +68,7 @@ OPEN_CMD = "open" if sys.platform == "darwin" else "xdg-open"
 
 ROOT.mkdir(parents=True, exist_ok=True)
 AUDIO.mkdir(parents=True, exist_ok=True)
+CLIPS.mkdir(parents=True, exist_ok=True)
 
 _model = None
 _lock = threading.Lock()          # MPS: one generate() at a time
@@ -171,6 +184,35 @@ def chunk_hash(c, doc, profs=None):
     return hashlib.sha256(key.encode()).hexdigest()[:20]
 
 
+def is_speech(c):
+    return c.get("type", "speech") == "speech"
+
+
+# ── clips ───────────────────────────────────────────────────────────────
+# Everything in clips/ is a PCM wav this program wrote via ffmpeg, so the
+# stdlib wave module can read it — no torch import just to ask a duration.
+def clip_secs(p):
+    try:
+        with wave.open(str(p), "rb") as w:
+            fr = w.getframerate()
+            return round(w.getnframes() / fr, 2) if fr else 0.0
+    except (OSError, wave.Error):
+        return 0.0
+
+
+def clip_file(name):
+    p = CLIPS / f"{name}.wav"
+    if not p.exists():
+        raise FileNotFoundError(f"no clip '{name}'")
+    return p
+
+
+def clips_of(doc):
+    """The clip names a project's audio cards point at."""
+    return {c["clip"] for c in doc["chunks"]
+            if c.get("type") == "audio" and c.get("clip")}
+
+
 # ── projects ────────────────────────────────────────────────────────────
 def pdir(name):
     return ROOT / re.sub(r"[^a-z0-9_-]+", "-", name.lower())[:60]
@@ -236,12 +278,14 @@ def projects():
                 out.append({"name": d.name, "title": f"{d.name} (unreadable)",
                             "chunks": 0, "ready": 0, "words": 0, "broken": True})
                 continue
-            chunks = doc["chunks"]
-            ready = sum(1 for c in chunks
+            # the progress bar tracks what needs rendering, which is speech —
+            # an audio or silence card is never stale
+            sp = [c for c in doc["chunks"] if is_speech(c)]
+            ready = sum(1 for c in sp
                         if (AUDIO / f"{chunk_hash(c, doc, profs)}.wav").exists())
             out.append({"name": doc["name"], "title": doc.get("title", doc["name"]),
-                        "chunks": len(chunks), "ready": ready,
-                        "words": sum(len(c["text"].split()) for c in chunks)})
+                        "chunks": len(sp), "ready": ready,
+                        "words": sum(len(c["text"].split()) for c in sp)})
     return out
 
 
@@ -284,6 +328,7 @@ ARC_MEMBER = re.compile(
     r"^(manifest\.json|profiles\.json"
     r"|projects/[a-z0-9_-]{1,60}/(doc\.json|source\.md)"
     r"|voices/[a-z0-9_.-]{1,44}\.(wav|mp3|flac|m4a)"
+    r"|clips/[a-z0-9_.-]{1,44}\.wav"
     r"|audio/[a-z0-9]{1,40}\.wav)$")
 _EXTRACT = {"filter": "data"} if hasattr(tarfile, "data_filter") else {}
 
@@ -306,6 +351,8 @@ def voices_and_profiles(doc, profs):
     falls back to when its profile has gone."""
     pnames, vnames = {"Default"}, set()
     for c in doc["chunks"]:
+        if not is_speech(c):
+            continue
         pnames.add(c.get("profile", "Default"))
         v = (c.get("params") or {}).get("voice")
         if v:
@@ -328,8 +375,9 @@ def plan_export(names, with_audio):
     profs = profiles()
     plan = {"schema": ARCHIVE_SCHEMA, "created": time.strftime("%Y-%m-%d %H:%M:%S"),
             "with_audio": bool(with_audio), "projects": [], "voices": {},
-            "unreadable": [], "missing_voices": [], "bytes": 0}
-    vnames, pnames, audio = set(), set(), {}
+            "clips": {}, "unreadable": [],
+            "missing_voices": [], "missing_clips": [], "bytes": 0}
+    vnames, pnames, cnames, audio = set(), set(), set(), {}
     for nm in names:
         try:
             doc = load(nm)
@@ -342,8 +390,11 @@ def plan_export(names, with_audio):
         vs, ps = voices_and_profiles(doc, profs)
         vnames |= vs
         pnames |= ps
+        cnames |= clips_of(doc)
         rendered = 0
         for c in doc["chunks"]:
+            if not is_speech(c):
+                continue
             f = AUDIO / f"{chunk_hash(c, doc, profs)}.wav"
             if not f.exists():
                 continue
@@ -368,6 +419,14 @@ def plan_export(names, with_audio):
             plan["missing_voices"].append(v)
             continue
         plan["voices"][v] = {"file": f.name, "sha": sha256_file(f),
+                             "bytes": f.stat().st_size}
+        plan["bytes"] += f.stat().st_size
+    for cn in sorted(cnames):
+        f = CLIPS / f"{cn}.wav"
+        if not f.exists():
+            plan["missing_clips"].append(cn)
+            continue
+        plan["clips"][cn] = {"file": f.name, "sha": sha256_file(f),
                              "bytes": f.stat().st_size}
         plan["bytes"] += f.stat().st_size
     plan["kind"] = "library" if len(plan["projects"]) > 1 else "project"
@@ -413,6 +472,8 @@ def write_archive(plan, dest):
                 _add_file(tar, d / "source.md", f"projects/{p['name']}/source.md")
         for meta in plan["voices"].values():
             _add_file(tar, VOICES / meta["file"], f"voices/{meta['file']}")
+        for meta in plan["clips"].values():
+            _add_file(tar, CLIPS / meta["file"], f"clips/{meta['file']}")
         for name, f in sorted(audio.items()):
             _add_file(tar, f, f"audio/{name}")
     return dest
@@ -454,7 +515,8 @@ def import_archive(path, mode="skip"):
     in, once under the archive's profiles and once under this machine's, and
     each cached WAV is filed under its new name. A plain restore onto the
     machine that made the archive renames nothing and takes the fast path."""
-    rep = {"projects": [], "voices": [], "profiles": [], "audio": 0, "skipped": []}
+    rep = {"projects": [], "voices": [], "profiles": [], "clips": [],
+           "audio": 0, "skipped": []}
     tmp = Path(tempfile.mkdtemp(prefix=".import-", dir=ROOT))
     try:
         with tarfile.open(path, "r:gz") as tar:
@@ -492,6 +554,27 @@ def import_archive(path, mode="skip"):
                 rep["voices"].append(f"voice “{f.stem}” arrived as “{new}” — a "
                                      f"different clip already had that name")
 
+        # ── clips ── same never-overwrite rule as voices, and for the same
+        # reason: a clip is global, so replacing intro.wav would change every
+        # episode that opens with it. Unlike voices, a clip name is not part
+        # of any hash, so renaming one costs nothing beyond the pointer.
+        CLIPS.mkdir(parents=True, exist_ok=True)
+        seen_clips = {p.stem for p in CLIPS.glob("*.wav")}
+        cmap = {}
+        cdir = tmp / "clips"
+        for f in sorted(cdir.iterdir()) if cdir.is_dir() else []:
+            local = CLIPS / f.name
+            if local.exists() and sha256_file(local) == sha256_file(f):
+                cmap[f.stem] = f.stem
+                continue
+            new = f.stem if not local.exists() else _free_name(seen_clips, f.stem)
+            shutil.copy2(f, CLIPS / f"{new}.wav")
+            seen_clips.add(new)
+            cmap[f.stem] = new
+            if new != f.stem:
+                rep["clips"].append(f"clip “{f.stem}” arrived as “{new}” — a "
+                                    f"different clip already had that name")
+
         # ── profiles ──
         local_profs = profiles()
         pmap = {}
@@ -527,11 +610,14 @@ def import_archive(path, mode="skip"):
                     target, copied = _free_name(taken, target, "copy"), True
 
             # hashes as the archive knew them, before anything is repointed
-            old = [chunk_hash(c, doc, arc_profs) for c in doc["chunks"]]
+            old = [chunk_hash(c, doc, arc_profs) if is_speech(c) else None
+                   for c in doc["chunks"]]
             doc["name"] = target
             if copied:
                 doc["title"] = f"{doc.get('title', target)} (imported)"
             for c in doc["chunks"]:
+                if c.get("type") == "audio" and c.get("clip"):
+                    c["clip"] = cmap.get(c["clip"], c["clip"])
                 # Only write the key back if it was there or the name actually
                 # moved. Adding an explicit "Default" to a card that never had
                 # one would mean a plain restore did not return the document it
@@ -546,9 +632,12 @@ def import_archive(path, mode="skip"):
             dp = doc.get("params") or {}
             if dp.get("voice"):
                 dp["voice"] = vmap.get(dp["voice"], dp["voice"])
-            new = [chunk_hash(c, doc, local_profs) for c in doc["chunks"]]
+            new = [chunk_hash(c, doc, local_profs) if is_speech(c) else None
+                   for c in doc["chunks"]]
 
             for o, n in zip(old, new):
+                if not o:
+                    continue
                 src, dst = tmp / "audio" / f"{o}.wav", AUDIO / f"{n}.wav"
                 # copy, not move: two projects can share a chunk hash, and the
                 # second one still needs the file the first one took
@@ -698,8 +787,8 @@ def bake(name):
     already rendered stays on disk, so a later bake resumes where this left
     off rather than starting over."""
     doc = load(name)
-    todo = [c for c in doc["chunks"]
-            if not c.get("mute") and not (AUDIO / f"{chunk_hash(c, doc)}.wav").exists()]
+    todo = [c for c in doc["chunks"] if is_speech(c) and not c.get("mute")
+            and not (AUDIO / f"{chunk_hash(c, doc)}.wav").exists()]
     _bake.update(running=True, done=0, total=len(todo), project=name, label="",
                  cancel=False, stopped=False)
     try:
@@ -714,30 +803,89 @@ def bake(name):
         _bake.update(running=False, label="", cancel=False)
 
 
-def assemble(name, gap=0.35):
-    """Concatenate every chunk in order. Scene breaks get a longer rest."""
+def mixdown(doc, gap=0.35):
+    """Mix every card onto one timeline; (audio, sample_rate, missing) back.
+
+    A cursor walks the cards in order. Speech is placed at the cursor and
+    advances it by its own length plus a rest (scene breaks get a longer one,
+    as before). A silence card just advances it. An audio card is placed at
+    the cursor and advances it either past the whole clip (mode "full") or by
+    its "after" seconds — in which case the rest of the clip keeps playing
+    *under* whatever the cursor reaches next, which is how music fades out
+    beneath the first line of narration. Overlaps are summed and clamped.
+
+    Fades are percentages of the clip: fade [10, 90] ramps up over the first
+    10% and down over the last 10%. Gain is applied after the fade.
+
+    No model here — the sample rate comes from the first speech chunk on disk
+    (they are all rendered at the model's rate), so mixing never costs a
+    ten-second model load. Both assemble() and the in-browser preview sit on
+    this one function, so what you hear is what ships, by construction."""
     import torch, torchaudio as ta
-    doc = load(name)
-    m = get_model()
-    pieces, missing = [], 0
+    events, cursor, missing = [], 0.0, 0
     for c in doc["chunks"]:
         if c.get("mute"):                     # muted cards are simply not in the book
+            continue
+        kind = c.get("type", "speech")
+        if kind == "silence":
+            cursor += max(0.0, float(c.get("secs", 1.0)))
+            continue
+        if kind == "audio":
+            f = CLIPS / f"{c.get('clip', '')}.wav"
+            if not c.get("clip") or not f.exists():
+                missing += 1
+                continue
+            w, wsr = ta.load(str(f))
+            events.append((cursor, kind, w, wsr, c))
+            cursor += (max(0.0, float(c.get("after", 0.0)))
+                       if c.get("mode") == "after" else w.shape[-1] / wsr)
             continue
         f = AUDIO / f"{chunk_hash(c, doc)}.wav"
         if not f.exists():
             missing += 1
             continue
-        w, sr = ta.load(str(f))
-        pieces.append(w)
-        rest = 1.1 if c["text"].strip().startswith("❦") else gap
-        pieces.append(torch.zeros(1, int(sr * rest)))
-    if not pieces:
-        return None, len(doc["chunks"])
-    full = torch.cat(pieces, dim=-1)
+        w, wsr = ta.load(str(f))
+        events.append((cursor, kind, w, wsr, c))
+        cursor += w.shape[-1] / wsr + (1.1 if c["text"].strip().startswith("❦") else gap)
+    if not events:
+        return None, 0, missing
+    # every speech chunk is at the model's rate; only clips ever need resampling
+    sr = next((e[3] for e in events if e[1] == "speech"), events[0][3])
+    pieces = []
+    for start, kind, w, wsr, c in events:
+        if w.shape[0] > 1:                    # the book is mono; beds follow it
+            w = w.mean(0, keepdim=True)
+        if wsr != sr:
+            w = ta.functional.resample(w, wsr, sr)
+        if kind == "audio":
+            n = w.shape[-1]
+            lo, hi = (list(c.get("fade") or []) + [0, 100])[:2]
+            fi, fo = int(n * lo / 100), int(n * (100 - hi) / 100)
+            if fi > 0:
+                w[..., :fi] = w[..., :fi] * torch.linspace(0.0, 1.0, fi)
+            if fo > 0:
+                w[..., n - fo:] = w[..., n - fo:] * torch.linspace(1.0, 0.0, fo)
+            w = w * (float(c.get("gain", 100)) / 100.0)
+        pieces.append((int(start * sr), w))
+    # a trailing silence card pads the end, so the total honours the cursor too
+    total = max(int(cursor * sr), max(s + w.shape[-1] for s, w in pieces))
+    full = torch.zeros(1, total)
+    for s, w in pieces:
+        full[..., s:s + w.shape[-1]] += w
+    full.clamp_(-1.0, 1.0)
+    return full, sr, missing
+
+
+def assemble(name, gap=0.35):
+    """Mixdown to out/<name>.mp3 — the deliverable."""
+    import torchaudio as ta
+    full, sr, missing = mixdown(load(name), gap)
+    if full is None:
+        return None, missing
     out = pdir(name) / "out"
     out.mkdir(exist_ok=True)
     wav = out / f"{name}.wav"
-    ta.save(str(wav), full, m.sr)
+    ta.save(str(wav), full, sr)
     mp3 = out / f"{name}.mp3"
     if shutil.which("ffmpeg"):
         subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
@@ -748,13 +896,30 @@ def assemble(name, gap=0.35):
     return wav, missing
 
 
+def preview_book(name):
+    """The same mixdown assemble() ships, parked in a dotfile the browser can
+    stream — hearing the whole book should not overwrite the mp3 in out/.
+    16-bit is plenty for ears and halves what goes over the wire; the Finder
+    never shows the file, and export never packs out/."""
+    import torchaudio as ta
+    full, sr, missing = mixdown(load(name))
+    if full is None:
+        return None, 0, missing
+    out = pdir(name) / "out"
+    out.mkdir(exist_ok=True)
+    f = out / ".preview.wav"
+    ta.save(str(f), full, sr, encoding="PCM_S", bits_per_sample=16)
+    return f, round(full.shape[-1] / sr, 1), missing
+
+
 # ── the discuss window ──────────────────────────────────────────────────
 def ask_claude(project, question, chunk_ids=None):
     """Shell out to Claude Code headless, with the relevant text as context."""
     doc = load(project) if project else None
     ctx = ""
     if doc:
-        sel = [c for c in doc["chunks"] if not chunk_ids or c["id"] in chunk_ids]
+        sel = [c for c in doc["chunks"]
+               if is_speech(c) and (not chunk_ids or c["id"] in chunk_ids)]
         sel = sel[:40]
         ctx = (f"Working on an audiobook of \"{doc['title']}\".\n"
                f"{len(doc['chunks'])} chunks total. "
@@ -827,6 +992,9 @@ class H(BaseHTTPRequestHandler):
             return self._send(200, {
                 "projects": projects(),
                 "voices": sorted(p.stem for p in VOICES.glob("*.wav")),
+                "clips": sorted(({"name": p.stem, "secs": clip_secs(p)}
+                                 for p in CLIPS.glob("*.wav")),
+                                key=lambda c: c["name"]),
                 "profiles": profiles(),
                 "defaults": DEFAULTS, "bake": _bake,
                 "model": "warm" if _model else "cold"})
@@ -835,13 +1003,20 @@ class H(BaseHTTPRequestHandler):
             if not doc:
                 return self._send(404, {"error": "no such project"})
             for c in doc["chunks"]:
-                h = chunk_hash(c, doc)
-                c["hash"] = h
-                c["ready"] = (AUDIO / f"{h}.wav").exists()
-                c["effective"] = params_for(c, doc)
-                c.setdefault("profile", "Default")
                 c.setdefault("mute", False)
-                c.setdefault("height", 0)
+                if is_speech(c):
+                    h = chunk_hash(c, doc)
+                    c["hash"] = h
+                    c["ready"] = (AUDIO / f"{h}.wav").exists()
+                    c["effective"] = params_for(c, doc)
+                    c.setdefault("profile", "Default")
+                    c.setdefault("height", 0)
+                elif c["type"] == "audio":
+                    f = CLIPS / f"{c.get('clip', '')}.wav"
+                    c["ready"] = bool(c.get("clip")) and f.exists()
+                    c["cliplen"] = clip_secs(f) if c["ready"] else 0
+                else:                          # silence has nothing to render
+                    c["ready"] = True
             return self._send(200, doc)
         if u.path == "/api/jobs":
             nm = q.get("name", [""])[0]
@@ -856,6 +1031,17 @@ class H(BaseHTTPRequestHandler):
             if not f.exists():
                 return self._send(404, b"", "text/plain")
             return self._send(200, f.read_bytes(), "audio/wav")
+        if u.path == "/api/clip":
+            nm = re.sub(r"[^a-z0-9_-]", "", q.get("f", [""])[0])
+            f = CLIPS / f"{nm}.wav"
+            if not nm or not f.exists():
+                return self._send(404, b"", "text/plain")
+            return self._send_file(f, "audio/wav")   # music runs to megabytes
+        if u.path == "/api/book_audio":
+            f = pdir(q.get("name", [""])[0]) / "out" / ".preview.wav"
+            if not f.exists():
+                return self._send(404, b"", "text/plain")
+            return self._send_file(f, "audio/wav")   # a whole book; stream it
         if u.path == "/api/download":
             f = pdir(q.get("name", [""])[0]) / "out" / f"{q.get('name',[''])[0]}.mp3"
             if not f.exists():
@@ -894,21 +1080,52 @@ class H(BaseHTTPRequestHandler):
         mode = parse_qs(u.query).get("mode", ["skip"])[0]
         if mode not in ("skip", "replace", "copy"):
             return self._send(400, {"error": f"unknown mode {mode!r}"})
-        n = int(self.headers.get("Content-Length") or 0)
-        if not n:
-            return self._send(400, {"error": "empty upload"})
         fd, tmp = tempfile.mkstemp(dir=ROOT, prefix=".upload-", suffix=".tgz")
         try:
             with os.fdopen(fd, "wb") as f:
-                left = n
-                while left > 0:
-                    b = self.rfile.read(min(1 << 20, left))
-                    if not b:
-                        raise ValueError("upload cut short")
-                    f.write(b)
-                    left -= len(b)
+                self._read_body_to(f)
             with _docmut:
                 return self._send(200, {"ok": True, **import_archive(Path(tmp), mode)})
+        except Exception as ex:
+            return self._send(400, {"error": f"{type(ex).__name__}: {ex}"})
+        finally:
+            Path(tmp).unlink(missing_ok=True)
+
+    def _read_body_to(self, f):
+        n = int(self.headers.get("Content-Length") or 0)
+        if not n:
+            raise ValueError("empty upload")
+        left = n
+        while left > 0:
+            b = self.rfile.read(min(1 << 20, left))
+            if not b:
+                raise ValueError("upload cut short")
+            f.write(b)
+            left -= len(b)
+
+    def _clip_upload(self, u):
+        """Body is the audio file itself, like _import_archive — a song in a
+        base64 JSON field would hold the whole thing in memory twice. ffmpeg
+        does the reading, so anything ffmpeg can decode is fair game; what
+        lands in clips/ is always a plain PCM wav this program understands."""
+        fn = parse_qs(u.query).get("fn", ["clip"])[0]
+        stem = re.sub(r"[^a-z0-9_-]+", "-", Path(fn).stem.lower()).strip("-")[:40] or "clip"
+        if not shutil.which("ffmpeg"):
+            return self._send(400, {"error": "ffmpeg is needed to import audio clips"})
+        fd, tmp = tempfile.mkstemp(dir=ROOT, prefix=".clip-",
+                                   suffix=Path(fn).suffix or ".bin")
+        try:
+            with os.fdopen(fd, "wb") as f:
+                self._read_body_to(f)
+            CLIPS.mkdir(parents=True, exist_ok=True)
+            dest = CLIPS / f"{stem}.wav"
+            r = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                                "-i", tmp, str(dest)], capture_output=True, text=True)
+            if r.returncode:
+                dest.unlink(missing_ok=True)
+                return self._send(400, {"error": "ffmpeg could not read that file: "
+                                        + (r.stderr or "").strip()[-300:]})
+            return self._send(200, {"ok": True, "clip": stem, "secs": clip_secs(dest)})
         except Exception as ex:
             return self._send(400, {"error": f"{type(ex).__name__}: {ex}"})
         finally:
@@ -920,6 +1137,8 @@ class H(BaseHTTPRequestHandler):
             return self._send(401, {"error": "unauthorised"})
         if u.path == "/api/import_archive":
             return self._import_archive(u)
+        if u.path == "/api/clip/upload":       # raw body, so before the JSON parse
+            return self._clip_upload(u)
         n = int(self.headers.get("Content-Length") or 0)
         d = json.loads(self.rfile.read(n) or "{}")
         # Every mutating route needs a real project; without this a bad name
@@ -934,7 +1153,8 @@ class H(BaseHTTPRequestHandler):
         # — would otherwise both read the old document and the slower one would
         # write back a copy that never saw the other's edit. Chat and assemble
         # are slow and read-only, so they stay outside and never block typing.
-        lock = None if u.path in ("/api/chat", "/api/assemble", "/api/reveal") else _docmut
+        lock = None if u.path in ("/api/chat", "/api/assemble", "/api/book_preview",
+                                  "/api/reveal") else _docmut
         if lock:
             lock.acquire()
         try:
@@ -959,8 +1179,62 @@ class H(BaseHTTPRequestHandler):
                             c["height"] = int(d["height"])
                         if "params" in d:
                             c["params"] = {k: v for k, v in d["params"].items() if v is not None}
+                        # audio-card fields; clamp here so a stray value can
+                        # never put a negative duration on the timeline
+                        if "clip" in d:
+                            c["clip"] = re.sub(r"[^a-z0-9_-]", "", d["clip"] or "")
+                        if d.get("mode") in ("full", "after"):
+                            c["mode"] = d["mode"]
+                        if "after" in d:
+                            c["after"] = max(0.0, float(d["after"] or 0))
+                        if "gain" in d:
+                            c["gain"] = max(0.0, min(200.0, float(d["gain"])))
+                        if "fade" in d:
+                            lo, hi = (list(d["fade"]) + [0, 100])[:2]
+                            lo = max(0.0, min(100.0, float(lo)))
+                            c["fade"] = [lo, max(lo, min(100.0, float(hi)))]
+                        if "secs" in d:            # silence-card length
+                            c["secs"] = max(0.0, float(d["secs"] or 0))
                 save(doc)
                 return self._send(200, {"ok": True})
+
+            if u.path == "/api/insert":
+                doc = load(d["name"])
+                snapshot(doc, f"insert {d.get('kind', 'text')} card")
+                kind = d.get("kind", "speech")
+                if kind == "audio":
+                    c = {"id": 0, "type": "audio", "clip": "", "mode": "full",
+                         "after": 5.0, "fade": [0, 100], "gain": 100, "note": ""}
+                elif kind == "silence":
+                    c = {"id": 0, "type": "silence", "secs": 1.0, "note": ""}
+                else:
+                    c = {"id": 0, "text": "", "params": {}, "note": ""}
+                at = max(0, min(int(d.get("at", 0)), len(doc["chunks"])))
+                doc["chunks"].insert(at, c)
+                for i, c in enumerate(doc["chunks"]):
+                    c["id"] = i
+                save(doc)
+                return self._send(200, {"ok": True, "id": at})
+
+            if u.path == "/api/move":
+                doc = load(d["name"])
+                ch = doc["chunks"]
+                src = next((i for i, c in enumerate(ch) if c["id"] == d["id"]), None)
+                if src is None:
+                    return self._send(404, {"error": f"no card {d['id']}"})
+                # `to` is a slot in the list as it stands, before the card is
+                # lifted out — so a move past itself shifts down by one
+                to = max(0, min(int(d["to"]), len(ch)))
+                if to > src:
+                    to -= 1
+                if to == src:
+                    return self._send(200, {"ok": True, "moved": False})
+                snapshot(doc, "move card")
+                ch.insert(to, ch.pop(src))
+                for i, c in enumerate(ch):
+                    c["id"] = i
+                save(doc)
+                return self._send(200, {"ok": True, "moved": True})
 
             if u.path == "/api/duplicate":
                 doc = load(d["name"])
@@ -1010,6 +1284,8 @@ class H(BaseHTTPRequestHandler):
 
                 hits, stale_now, hitcount = [], 0, 0
                 for c in doc["chunks"]:
+                    if not is_speech(c):
+                        continue
                     new, n = pat.subn(repl, c["text"])
                     if not n:
                         continue
@@ -1024,8 +1300,8 @@ class H(BaseHTTPRequestHandler):
                                  "before": c["text"][a:b], "after": new[a:b + len(repl) - (m.end()-m.start())]})
 
                 # ~0.13s of generation per character, measured on this machine
-                cost = int(sum(len(c["text"]) for c in doc["chunks"]
-                               if any(h["id"] == c["id"] and h["was_ready"] for h in hits)) * 0.13)
+                cost = int(sum(len(c["text"]) for c in doc["chunks"] if is_speech(c)
+                               and any(h["id"] == c["id"] and h["was_ready"] for h in hits)) * 0.13)
                 if not d.get("dry_run") and hits:
                     # snapshot BEFORE writing, or undo restores the replacement
                     snapshot(doc, f"replace “{find[:24]}”")
@@ -1086,7 +1362,7 @@ class H(BaseHTTPRequestHandler):
                 snapshot(doc, "split")
                 out = []
                 for c in doc["chunks"]:
-                    if c["id"] == d["id"] and 0 < d["at"] < len(c["text"]):
+                    if c["id"] == d["id"] and is_speech(c) and 0 < d["at"] < len(c["text"]):
                         a, b = c["text"][:d["at"]].strip(), c["text"][d["at"]:].strip()
                         out.append({**c, "text": a})
                         out.append({**c, "text": b, "note": ""})
@@ -1105,7 +1381,8 @@ class H(BaseHTTPRequestHandler):
                     if skip:
                         skip = False
                         continue
-                    if c["id"] == d["id"] and i + 1 < len(doc["chunks"]):
+                    if (c["id"] == d["id"] and i + 1 < len(doc["chunks"])
+                            and is_speech(c) and is_speech(doc["chunks"][i + 1])):
                         nxt = doc["chunks"][i + 1]
                         out.append({**c, "text": f'{c["text"]} {nxt["text"]}'.strip()})
                         skip = True
@@ -1141,6 +1418,10 @@ class H(BaseHTTPRequestHandler):
             if u.path == "/api/assemble":
                 f, missing = assemble(d["name"])
                 return self._send(200, {"ok": bool(f), "file": str(f) if f else None,
+                                        "missing": missing})
+            if u.path == "/api/book_preview":
+                f, secs, missing = preview_book(d["name"])
+                return self._send(200, {"ok": bool(f), "secs": secs,
                                         "missing": missing})
             if u.path == "/api/chat":
                 return self._send(200, {"reply": ask_claude(
