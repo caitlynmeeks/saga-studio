@@ -825,8 +825,38 @@ def bake(name):
         _bake.update(running=False, label="", cancel=False)
 
 
-def mixdown(doc, gap=0.35, frm=None):
-    """Mix every card onto one timeline; (audio, sample_rate, missing) back.
+# A card that is not rendered contributes silence, and silence is
+# indistinguishable from a pause you put there on purpose — so an unrendered
+# card in the middle of a chapter slips past unnoticed. In a preview it gets a
+# soft chime instead, and the gap announces itself. Never in assemble(): the
+# deliverable must not contain studio noises.
+CHIME_SECS = 0.45
+
+
+def chime_wave(sr):
+    """A brief two-note bell — a fifth, decaying fast. Quiet enough to sit under
+    narration without startling, distinct enough not to be mistaken for it."""
+    import torch, math
+    n = int(sr * CHIME_SECS)
+    t = torch.arange(n, dtype=torch.float32) / sr
+    env = torch.exp(-t * 7.0)
+    a = int(sr * 0.006)                    # a few ms of attack, or it clicks
+    if a:
+        env[:a] = env[:a] * torch.linspace(0.0, 1.0, a)
+    tone = (torch.sin(2 * math.pi * 784.0 * t)
+            + 0.45 * torch.sin(2 * math.pi * 1176.0 * t))
+    return (tone * env * 0.13).unsqueeze(0)
+
+
+def mixdown(doc, gap=0.35, frm=None, chime=False):
+    """Mix every card onto one timeline; (audio, sample_rate, missing, marks) back.
+
+    `marks` is where each card starts, in seconds — [{"id", "at"}, …]. The
+    browser follows it during preview to show which card is speaking, which is
+    also what makes "stop, fix that one" possible without hunting for it.
+
+    `chime` marks unready cards with a tone instead of dropping them. Preview
+    only; assemble() leaves them out, as it always has.
 
     `frm` is a card id to start at: the timeline then begins with that card at
     zero and runs to the end, which is how you hear the rest of the book after
@@ -855,37 +885,60 @@ def mixdown(doc, gap=0.35, frm=None):
         i = next((k for k, c in enumerate(cards) if c["id"] == frm), None)
         if i is not None:
             cards = cards[i:]
-    events, cursor, missing = [], 0.0, 0
+    events, cursor, missing, marks = [], 0.0, 0, []
+
+    def note(c):                              # where this card begins
+        marks.append({"id": c["id"], "at": round(cursor, 3)})
+
+    def unready(c):
+        """Not in the book. In a preview, at least make it audible."""
+        nonlocal cursor, missing
+        missing += 1
+        if not chime:
+            return
+        note(c)
+        events.append((cursor, "chime", None, None, c))
+        cursor += CHIME_SECS + gap
+
     for c in cards:
         if c.get("mute"):                     # muted cards are simply not in the book
             continue
         kind = c.get("type", "speech")
         if kind == "silence":
+            note(c)
             cursor += max(0.0, float(c.get("secs", 1.0)))
             continue
         if kind == "audio":
             f = CLIPS / f"{c.get('clip', '')}.wav"
             if not c.get("clip") or not f.exists():
-                missing += 1
+                unready(c)
                 continue
             w, wsr = ta.load(str(f))
+            note(c)
             events.append((cursor, kind, w, wsr, c))
             cursor += (max(0.0, float(c.get("after", 0.0)))
                        if c.get("mode") == "after" else w.shape[-1] / wsr)
             continue
         f = AUDIO / f"{chunk_hash(c, doc)}.wav"
         if not f.exists():
-            missing += 1
+            unready(c)
             continue
         w, wsr = ta.load(str(f))
+        note(c)
         events.append((cursor, kind, w, wsr, c))
         cursor += w.shape[-1] / wsr + (1.1 if c["text"].strip().startswith("❦") else gap)
     if not events:
-        return None, 0, missing
-    # every speech chunk is at the model's rate; only clips ever need resampling
-    sr = next((e[3] for e in events if e[1] == "speech"), events[0][3])
+        return None, 0, missing, []
+    # every speech chunk is at the model's rate; only clips ever need resampling.
+    # A preview of a chapter nobody has rendered yet is all chimes and carries no
+    # rate of its own, so fall back to a clip's, then to the model's.
+    sr = (next((e[3] for e in events if e[1] == "speech"), None)
+          or next((e[3] for e in events if e[3]), None) or 24000)
     pieces = []
     for start, kind, w, wsr, c in events:
+        if kind == "chime":
+            pieces.append((int(start * sr), chime_wave(sr)))
+            continue
         if w.shape[0] > 1:                    # the book is mono; beds follow it
             w = w.mean(0, keepdim=True)
         if wsr != sr:
@@ -906,13 +959,13 @@ def mixdown(doc, gap=0.35, frm=None):
     for s, w in pieces:
         full[..., s:s + w.shape[-1]] += w
     full.clamp_(-1.0, 1.0)
-    return full, sr, missing
+    return full, sr, missing, marks
 
 
 def assemble(name, gap=0.35):
     """Mixdown to out/<name>.mp3 — the deliverable."""
     import torchaudio as ta
-    full, sr, missing = mixdown(load(name), gap)
+    full, sr, missing, _ = mixdown(load(name), gap)
     if full is None:
         return None, missing
     out = pdir(name) / "out"
@@ -938,14 +991,14 @@ def preview_book(name, frm=None):
     `frm` starts the mix at a card instead of at the top, so an edit in chapter
     nine costs nine seconds to hear rather than the eight minutes before it."""
     import torchaudio as ta
-    full, sr, missing = mixdown(load(name), frm=frm)
+    full, sr, missing, marks = mixdown(load(name), frm=frm, chime=True)
     if full is None:
-        return None, 0, missing
+        return None, 0, missing, []
     out = pdir(name) / "out"
     out.mkdir(exist_ok=True)
     f = out / ".preview.wav"
     ta.save(str(f), full, sr, encoding="PCM_S", bits_per_sample=16)
-    return f, round(full.shape[-1] / sr, 1), missing
+    return f, round(full.shape[-1] / sr, 1), missing, marks
 
 
 # ── the discuss window ──────────────────────────────────────────────────
@@ -1460,10 +1513,11 @@ class H(BaseHTTPRequestHandler):
                                         "missing": missing})
             if u.path == "/api/book_preview":
                 frm = d.get("from")
-                f, secs, missing = preview_book(d["name"],
-                                                None if frm is None else int(frm))
+                f, secs, missing, marks = preview_book(
+                    d["name"], None if frm is None else int(frm))
                 return self._send(200, {"ok": bool(f), "secs": secs,
-                                        "missing": missing, "from": frm})
+                                        "missing": missing, "from": frm,
+                                        "marks": marks})
             if u.path == "/api/chat":
                 return self._send(200, {"reply": ask_claude(
                     d.get("name"), d["question"], d.get("chunks"))})

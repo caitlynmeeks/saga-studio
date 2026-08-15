@@ -32,6 +32,11 @@ aside{border-right:1px solid var(--line)}
 main{flex:1;min-height:0;overflow-y:auto;padding:14px 18px;overflow-anchor:none}
 footer{grid-column:1/-1;display:flex;align-items:center;gap:10px;padding:0 14px;
 background:var(--chrome);border-top:1px solid var(--line)}
+/* the footer note sits in a row of buttons, so it reads as one of them rather
+   than as a headline shouting over them */
+#status{font-size:11.5px}
+#status a{color:var(--amber);text-decoration:underline dotted;cursor:pointer}
+#status a:hover{color:var(--bright)}
 h2{font-size:11px;text-transform:uppercase;letter-spacing:.14em;color:var(--dim);margin:2px 0 8px}
 #drop{border:1.5px dashed var(--line);border-radius:8px;padding:20px 10px;text-align:center;
 color:var(--faint);cursor:pointer;transition:.15s;font-size:12.5px}
@@ -49,6 +54,16 @@ color:var(--faint);cursor:pointer;transition:.15s;font-size:12.5px}
    scanning a long stack — the border alone reads as noise at a glance. */
 .chunk.cur{border-color:var(--amber);box-shadow:inset 3px 0 0 var(--amber)}
 .chunk.cur .top{background:#181510;color:var(--amber)}
+/* the card being spoken right now — green, because this one is about the
+   audio, and it moves on by itself rather than waiting for you */
+.chunk.playing{border-color:var(--green);box-shadow:inset 3px 0 0 var(--green)}
+.chunk.playing .top{background:#111b14;color:var(--green)}
+.chunk.playing .top::after{content:'▸ playing';order:-1;font-size:9.5px;
+  letter-spacing:.1em;text-transform:uppercase;color:var(--green);font-weight:bold}
+/* a card with nothing rendered behind it: what the chime is telling you */
+.chunk.playing.nores .top{background:#1d1512;color:var(--amber)}
+.chunk.playing.nores{border-color:var(--amber);box-shadow:inset 3px 0 0 var(--amber)}
+.chunk.playing.nores .top::after{content:'▸ not rendered';color:var(--amber)}
 .chunk.cur .top::before{content:'editing';order:-1;font-size:9.5px;letter-spacing:.1em;
   text-transform:uppercase;color:var(--bg);background:var(--amber);border-radius:3px;
   padding:0 5px;font-weight:bold}
@@ -1036,7 +1051,43 @@ async function stopBake(){
 // out/<name>.mp3. The button toggles, shows where it is in the book, and any
 // other play button stops it: one audio channel for the whole app.
 const fmtTime=t=>`${Math.floor(t/60)}:${String(Math.floor(t%60)).padStart(2,'0')}`;
-let BOOKPLAY=null;
+let BOOKPLAY=null, MARKS=[], MARKI=-1;
+
+// Which card is speaking at time t. The server sends where each one starts;
+// playback only ever moves forward, so this walks on from where it left off
+// rather than searching the whole book four times a second.
+function markAt(t){
+  if(!MARKS.length)return -1;
+  let i=(MARKI>=0&&MARKI<MARKS.length&&MARKS[MARKI].at<=t)?MARKI:0;
+  while(i+1<MARKS.length&&MARKS[i+1].at<=t)i++;
+  return i;
+}
+// The card's own number, not its place in the mix. Previewing from the middle
+// makes those two disagree — "card 4 of 63" while the card under your eyes says
+// #153 — and the number you want is always the one written on the card. The
+// total is the whole document for the same reason: it is the scale you think in.
+const playLabel=t=>{
+  const m=MARKS[MARKI>=0?MARKI:0];
+  return m&&DOC?`■ card #${m.id} of ${DOC.chunks.length}`:`■ ${fmtTime(t||0)}`;
+};
+function clearPlaying(){
+  document.querySelectorAll('#main .chunk.playing')
+    .forEach(el=>el.classList.remove('playing','nores'));
+}
+// Keep the speaking card on screen — the whole point is that when you hear a
+// problem, the card is already in front of you. But do not haul the list about
+// on every card: only move when it has drifted out of the comfortable middle,
+// or following along becomes seasickness.
+function followCard(id){
+  clearPlaying();
+  const el=$('c'+id); if(!el)return;
+  el.classList.add('playing');
+  const c=DOC&&DOC.chunks.find(x=>x.id===id);
+  if(c&&!c.ready&&c.type!=='silence')el.classList.add('nores');   // the chime you just heard
+  const m=$('main'), r=el.getBoundingClientRect(), mr=m.getBoundingClientRect();
+  if(r.top<mr.top+50||r.bottom>mr.bottom-50)
+    el.scrollIntoView({block:'center',behavior:'smooth'});
+}
 async function previewBook(){
   if(!DOC)return void($('status').textContent='open a document first');
   const b=$('pvbook');
@@ -1050,20 +1101,36 @@ async function previewBook(){
     ?`<span class="warn">${esc(r.error)}</span>`
     :'<span class="warn">nothing to preview yet</span> — render or bake some cards first');
   $('status').innerHTML=(r.missing
-    ?`<span class="warn">${r.missing} card(s) not ready — playing without them</span> · `:'')+
+    ?missChip(r.missing)+' — a chime marks each one · ':'')+
     `previewing ${fmtTime(r.secs)}`+(from==null?' of audiobook':` from card #${from}`);
+  MARKS=r.marks||[]; MARKI=-1;
   if(AUDIO){ AUDIO.pause(); AUDIO.currentTime=0; }
   const a=new Audio('/api/book_audio?name='+encodeURIComponent(DOC.name)+'&t='+Date.now());
   AUDIO=a; BOOKPLAY=a;
-  const done=()=>{ if(BOOKPLAY===a){ BOOKPLAY=null; syncBookBtn(); } };
+  const done=()=>{
+    if(BOOKPLAY!==a)return;
+    BOOKPLAY=null;
+    const at=MARKI>=0&&MARKS[MARKI]?MARKS[MARKI].id:null;
+    clearPlaying();
+    // Stopping partway leaves you on the card you stopped at, so the fix and
+    // the "preview from #here" that follows it need no scrolling and no
+    // clicking. Reaching the end selects nothing: the next play starts at the
+    // top, which is what finishing a book means.
+    CUR=a.ended?null:at;
+    paintCur();                       // repaints and puts the button back
+  };
   a.addEventListener('pause',done);
   a.addEventListener('ended',done);
   a.addEventListener('error',()=>{ done(); $('status').innerHTML=
     '<span class="warn">could not play the preview</span>'; });
-  a.addEventListener('timeupdate',()=>{ if(BOOKPLAY===a)
-    b.textContent=`■ ${fmtTime(a.currentTime)} / ${fmtTime(r.secs)}`; });
+  a.addEventListener('timeupdate',()=>{
+    if(BOOKPLAY!==a)return;
+    const i=markAt(a.currentTime);
+    if(i>=0&&i!==MARKI){ MARKI=i; followCard(MARKS[i].id); }
+    b.textContent=playLabel(a.currentTime);
+  });
   a.play();
-  b.textContent='■ 0:00 / '+fmtTime(r.secs);
+  b.textContent=playLabel(0);
 }
 // Dropping the anchor and pressing play is two clicks for one thought, so the
 // button is the thought: back to the top, and go.
@@ -1073,12 +1140,55 @@ async function previewFromTop(){
   await previewBook();
 }
 
+// Cards that are live but have nothing behind them. They are dropped from the
+// mix in silence, and the mp3 that comes out sounds finished — so this is worth
+// saying before the work rather than in a note underneath it afterwards.
+const unrendered=()=>DOC?DOC.chunks.filter(c=>!c.mute&&!c.ready&&c.type!=='silence'):[];
+
+// "3 cards not ready" is a fact you want to act on, not merely read. Clicking
+// it walks you through them one per press — which beats scrolling a two-hundred
+// card stack hunting for amber dots.
+let MISSI=-1;
+const missChip=n=>`<a href="#" onclick="jumpUnrendered();return false" `+
+  `title="go to the next card that has not been rendered">${n} card(s) not ready</a>`;
+function jumpUnrendered(){
+  const m=unrendered();
+  if(!m.length){ MISSI=-1;
+    return void($('status').innerHTML='<span class="ok">every live card is rendered</span>'); }
+  MISSI=(MISSI+1)%m.length;                 // wraps, so it never dead-ends
+  const c=m[MISSI];
+  setCur(c.id);                             // marks it, and arms preview-from-here
+  // Instant, not smooth: the next unrendered card can be a hundred cards away,
+  // and gliding there takes long enough that you wonder whether the click
+  // registered. Following along during playback is a different case — those
+  // hops are short, so that one animates.
+  const el=$('c'+c.id);
+  if(el)el.scrollIntoView({block:'center'});
+  $('status').innerHTML=missChip(m.length)+
+    ` · showing #${c.id}, ${MISSI+1} of ${m.length} — click again for the next`;
+}
+
 async function assemble(){
   if(!DOC)return;
+  // A card you edited a moment ago is stale even if the screen has not caught
+  // up, and a bake may have finished since the last look — ask the server what
+  // is really rendered before counting.
+  await flushAll(); await syncCards();
+  const miss=unrendered();
+  if(miss.length){
+    const list=miss.slice(0,12).map(c=>'#'+c.id+(c.type==='audio'?' (no clip)':'')).join(', ')
+      +(miss.length>12?`, and ${miss.length-12} more`:'');
+    if(!confirm(
+      `${miss.length} live card${miss.length>1?'s have':' has'} not been rendered:\n\n${list}\n\n`+
+      `They will be missing from the audiobook.\n\n`+
+      `OK to assemble without them — or Cancel and press "bake all stale" first.`))
+      return void($('status').innerHTML=
+        `<span class="warn">assemble cancelled</span> · `+missChip(miss.length));
+  }
   $('status').textContent='assembling…';
   const r=await api('/api/assemble',{name:DOC.name});
   $('status').innerHTML=r.ok?`<span class="ok">assembled</span> ${esc(r.file)}${
-    r.missing?` <span class="warn">(${r.missing} chunk(s) not rendered)</span>`:''}`
+    r.missing?' · '+missChip(r.missing)+' and left out':''}`
     :'nothing rendered yet';
   open_(DOC.name,true); }
 
