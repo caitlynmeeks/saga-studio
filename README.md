@@ -57,8 +57,16 @@ Only the first **6 seconds** shape cadence and the first **10** shape timbre
   every episode.
 - **Silence cards** are a timed rest — half a second or half a minute.
 - **Insert and reorder.** Hover between any two cards for the insert strip
-  (+ text · + ♪ audio · + silence), and drag any card by its ⠿ grip to move
-  it. Both are undoable.
+  (+ paste · + text · + ♪ audio · + silence), and drag any card by its ⠿ grip
+  to move it. Both are undoable.
+- **Copy a card, paste it anywhere.** **⧉** in a card's header copies it —
+  words, profile, take, or a clip with its fades and timing — and **+ paste**
+  in any insert strip drops it back, in this episode or another one. That is
+  how the intro music from episode 1 gets to the top of episode 2 with the
+  evening you spent tuning it still attached. The copy survives switching
+  documents and closing the tab. A pasted card usually needs no rendering:
+  audio is filed by a hash of the words and the voice, so the copy finds the
+  wav the original already had.
 - **Voice profiles** are reusable objects: a set of voice clips plus delivery
   parameters, with a note about when to use it. Make a flat one for a character
   reading a machine log and a warm one for the same character in conversation,
@@ -72,7 +80,12 @@ Only the first **6 seconds** shape cadence and the first **10** shape timbre
   Chatterbox has no low-quality mode; the only real speedup is less text.
 - **Renders run in the background.** Queue several, switch documents, close the
   tab — they keep going.
-- **Undo** is 25 deep and covers edits, split, merge, duplicate and remove.
+- **Find and replace** across a whole episode, with a dry run first: it lists
+  every hit, and warns how many already-rendered cards a replacement would
+  make stale. **⌘F** opens it, **×** or **Esc** puts it away, and it stays
+  where you left it.
+- **Undo** is 25 deep and covers edits, split, merge, duplicate, paste and
+  remove.
 - **Bake** renders everything stale. **▶ preview audiobook** mixes the whole
   book and plays it in place — the identical mix, nothing exported; press
   again to stop. **Assemble** writes that mix to an MP3: cards are placed on
