@@ -179,9 +179,14 @@ def params_for(c, doc, profs=None):
 
 def chunk_hash(c, doc, profs=None):
     p = params_for(c, doc, profs)
-    key = json.dumps([c["text"], p["voice"], p["exag"], p["cfg"],
-                      p["temp"], p["rep"]], sort_keys=True)
-    return hashlib.sha256(key.encode()).hexdigest()[:20]
+    key = [c["text"], p["voice"], p["exag"], p["cfg"], p["temp"], p["rep"]]
+    # Take 0 hashes exactly as it did before takes existed, so nothing already
+    # rendered goes stale — only a card you have actually re-rolled gets a new
+    # name, and each take keeps its own file, so stepping back to take 2 plays
+    # take 2 again instead of re-rendering it.
+    if c.get("seed"):
+        key.append({"take": int(c["seed"])})
+    return hashlib.sha256(json.dumps(key, sort_keys=True).encode()).hexdigest()[:20]
 
 
 def is_speech(c):
@@ -678,6 +683,21 @@ def voice_file(name):
     raise FileNotFoundError(f"no voice '{name}'")
 
 
+def seed_take(n):
+    """Pin the sampler for take n, or leave it running free for take 0.
+
+    Chatterbox samples with temperature and never seeds, so two generate()
+    calls on the same words come out differently — that is what makes re-render
+    a fresh reading, and it is why take 0 stays unseeded and keeps behaving as
+    it always has. A numbered take pins the global RNG so the same take is the
+    same performance every time, which is what makes stepping back to an
+    earlier one mean anything. Reproducible on this machine and this build of
+    torch — a seed is not a portable description of a voice."""
+    if n:
+        import torch
+        torch.manual_seed(int(n))
+
+
 def render(c, doc, force=False):
     """Render one chunk. With force=True the cache is bypassed and overwritten —
     the render/preview buttons always generate, so a press always means work."""
@@ -690,6 +710,7 @@ def render(c, doc, force=False):
     m = get_model()
     spoken = c["text"].replace("❦", " ").strip()      # scene mark: silent
     with _lock:
+        seed_take(c.get("seed"))
         wav = m.generate(spoken, audio_prompt_path=str(voice_file(p["voice"])),
                          exaggeration=p["exag"], cfg_weight=p["cfg"],
                          temperature=p["temp"], repetition_penalty=p["rep"])
@@ -710,14 +731,15 @@ def render_preview(c, doc, force=False, text=None):
     import torchaudio as ta
     p = params_for(c, doc)
     spoken = (text if text is not None else c["text"]).replace("❦", " ").strip()
-    key = json.dumps([spoken, p["voice"], p["exag"], p["cfg"], p["temp"], p["rep"], "prev"],
-                     sort_keys=True)
+    key = json.dumps([spoken, p["voice"], p["exag"], p["cfg"], p["temp"], p["rep"],
+                      "prev", int(c.get("seed") or 0)], sort_keys=True)
     h = "p" + hashlib.sha256(key.encode()).hexdigest()[:19]
     dest = AUDIO / f"{h}.wav"
     if dest.exists() and not force:
         return h, True, spoken
     m = get_model()
     with _lock:
+        seed_take(c.get("seed"))
         wav = m.generate(spoken, audio_prompt_path=str(voice_file(p["voice"])),
                          exaggeration=p["exag"], cfg_weight=p["cfg"],
                          temperature=p["temp"], repetition_penalty=p["rep"])
@@ -803,8 +825,14 @@ def bake(name):
         _bake.update(running=False, label="", cancel=False)
 
 
-def mixdown(doc, gap=0.35):
+def mixdown(doc, gap=0.35, frm=None):
     """Mix every card onto one timeline; (audio, sample_rate, missing) back.
+
+    `frm` is a card id to start at: the timeline then begins with that card at
+    zero and runs to the end, which is how you hear the rest of the book after
+    fixing something in the middle without sitting through what came before.
+    A music bed opened earlier is simply not in that mix — the cards before the
+    start are not on the timeline at all, so there is nothing to carry over.
 
     A cursor walks the cards in order. Speech is placed at the cursor and
     advances it by its own length plus a rest (scene breaks get a longer one,
@@ -822,8 +850,13 @@ def mixdown(doc, gap=0.35):
     ten-second model load. Both assemble() and the in-browser preview sit on
     this one function, so what you hear is what ships, by construction."""
     import torch, torchaudio as ta
+    cards = doc["chunks"]
+    if frm is not None:
+        i = next((k for k, c in enumerate(cards) if c["id"] == frm), None)
+        if i is not None:
+            cards = cards[i:]
     events, cursor, missing = [], 0.0, 0
-    for c in doc["chunks"]:
+    for c in cards:
         if c.get("mute"):                     # muted cards are simply not in the book
             continue
         kind = c.get("type", "speech")
@@ -896,13 +929,16 @@ def assemble(name, gap=0.35):
     return wav, missing
 
 
-def preview_book(name):
+def preview_book(name, frm=None):
     """The same mixdown assemble() ships, parked in a dotfile the browser can
     stream — hearing the whole book should not overwrite the mp3 in out/.
     16-bit is plenty for ears and halves what goes over the wire; the Finder
-    never shows the file, and export never packs out/."""
+    never shows the file, and export never packs out/.
+
+    `frm` starts the mix at a card instead of at the top, so an edit in chapter
+    nine costs nine seconds to hear rather than the eight minutes before it."""
     import torchaudio as ta
-    full, sr, missing = mixdown(load(name))
+    full, sr, missing = mixdown(load(name), frm=frm)
     if full is None:
         return None, 0, missing
     out = pdir(name) / "out"
@@ -1011,6 +1047,7 @@ class H(BaseHTTPRequestHandler):
                     c["effective"] = params_for(c, doc)
                     c.setdefault("profile", "Default")
                     c.setdefault("height", 0)
+                    c.setdefault("seed", 0)
                 elif c["type"] == "audio":
                     f = CLIPS / f"{c.get('clip', '')}.wav"
                     c["ready"] = bool(c.get("clip")) and f.exists()
@@ -1179,6 +1216,8 @@ class H(BaseHTTPRequestHandler):
                             c["height"] = int(d["height"])
                         if "params" in d:
                             c["params"] = {k: v for k, v in d["params"].items() if v is not None}
+                        if "seed" in d:            # which take of this card to speak
+                            c["seed"] = max(0, int(d["seed"] or 0))
                         # audio-card fields; clamp here so a stray value can
                         # never put a negative duration on the timeline
                         if "clip" in d:
@@ -1420,9 +1459,11 @@ class H(BaseHTTPRequestHandler):
                 return self._send(200, {"ok": bool(f), "file": str(f) if f else None,
                                         "missing": missing})
             if u.path == "/api/book_preview":
-                f, secs, missing = preview_book(d["name"])
+                frm = d.get("from")
+                f, secs, missing = preview_book(d["name"],
+                                                None if frm is None else int(frm))
                 return self._send(200, {"ok": bool(f), "secs": secs,
-                                        "missing": missing})
+                                        "missing": missing, "from": frm})
             if u.path == "/api/chat":
                 return self._send(200, {"reply": ask_claude(
                     d.get("name"), d["question"], d.get("chunks"))})
