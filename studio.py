@@ -545,6 +545,9 @@ def paste_card(src):
     sub = str(src.get("sub") or "")[:500]
     if sub:
         c["sub"] = sub
+    label = str(src.get("label") or "")[:80]
+    if label:
+        c["label"] = label
     return c
 
 
@@ -2884,6 +2887,12 @@ class H(BaseHTTPRequestHandler):
                             c["runon"] = bool(d["runon"])
                         if "height" in d:          # editor height, persisted
                             c["height"] = int(d["height"])
+                        if "min" in d:             # collapsed to its header bar
+                            c["min"] = bool(d["min"])
+                        if "label" in d:
+                            # a name for the collapsed bar — "Maisie discovers
+                            # the plan" reads better than a text fragment
+                            c["label"] = str(d["label"] or "")[:80]
                         if "params" in d:
                             # A card's own overrides. Clamped here because they
                             # land in the hash: a stray value would name a wav

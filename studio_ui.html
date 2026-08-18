@@ -146,6 +146,10 @@ color:var(--dim);white-space:nowrap}
 .opt select{max-width:150px;font-size:11px}
 /* what the stage shows, when it differs from what is spoken */
 .subrow input{flex:1;color:var(--bright)}
+/* a collapsed card: the header bar carries the whole identity */
+.chunk.min{background:#101413}
+.cardname{color:var(--bright);overflow:hidden;text-overflow:ellipsis;
+white-space:nowrap;max-width:42ch}
 button.tiny{padding:0 5px;font-size:12px;line-height:17px;border-color:transparent;color:var(--faint)}
 .proj:hover button.tiny{border-color:var(--line)}
 /* same bargain in a card header: invisible until the card is under the mouse,
@@ -1607,6 +1611,28 @@ function ctxAsk(suggested,placeholder,label,onOk){
   inp.focus(); inp.select();
 }
 
+// Every per-card verb that never earned a button lives on the header's
+// right-click: collapse, naming, locking. Delegated once — the stack rebuilds
+// constantly and per-card listeners would double up. Inputs keep their native
+// menu; only the plain header surface is claimed.
+document.addEventListener('contextmenu',e=>{
+  if(e.target.closest('input,select,textarea,button'))return;
+  const top=e.target.closest('#main .chunk > .top'); if(!top)return;
+  const card=top.closest('.chunk');
+  cardMenu(e,+card.id.slice(1));
+});
+function cardMenu(e,id){
+  const c=DOC&&DOC.chunks.find(x=>x.id===id); if(!c)return;
+  const items=[
+    {label:c.min?'expand':'collapse to a bar', run:()=>setMin(id,!c.min)},
+    {label:c.label?'rename…':'name…', run:()=>{ openCtx(e,[]);
+       ctxAsk(c.label||'','Maisie discovers the plan','name',v=>setCard(id,{label:v},true)); }},
+  ];
+  if(c.label)items.push({label:'clear the name', run:()=>setCard(id,{label:''},true)});
+  items.push('-',{label:'copy', run:()=>copyCard(id)});
+  openCtx(e,items);
+}
+
 function projMenu(e,name){
   const p=(STATE.projects||[]).find(x=>x.name===name); if(!p)return;
   openCtx(e,[
@@ -1695,12 +1721,40 @@ function renderDoc(){
   bindDrag(); paintClip();          // the strips are new, so their paste buttons are too
 }
 function cardHTML(c){
+  if(c.min)return minCard(c);
   return c.type==='audio'?audioCard(c)
     :c.type==='silence'?silenceCard(c)
     :c.type==='voiced'?voicedCard(c)
     :c.type==='visual'?visualCard(c)
     :c.type==='choice'?choiceCard(c):speechCard(c);
 }
+// ── collapsed cards ───────────────────────────────────────
+// A card folded down to its header bar: same identity, same dot, same grip —
+// which is the point, because a bar is what you can actually drag around a
+// two-hundred-card stack. The name is yours if you set one ("Maisie discovers
+// the plan"), the card's own gist otherwise.
+const cardName=c=>c.label||clipLabel(c)||'(empty card)';
+const minBtn=id=>`<button class="tiny" onclick="setMin(${id},true)"
+  title="collapse to a bar — easier to drag; right-click the header to name it">▾</button>`;
+function minCard(c){
+  return `
+   <div class="chunk min ${CUR===c.id?'cur':''}" id="c${c.id}"
+     onmousedown="setCur(${c.id})" style="${c.mute?'opacity:.45':''}">
+    <div class="top" style="border-bottom:0">
+      ${grip(c.id)}
+      <span class="dot ${c.mute?'':(c.ready?'ready':'stale')}"></span>
+      <span>#${c.id}</span>
+      <span class="cardname" title="right-click to name this card">${esc(cardName(c))}</span>
+      ${c.locked?'<span class="pill" title="locked — right-click to unlock">🔒</span>':''}
+      ${c.mute?'<span class="pill warn">muted</span>':''}
+      ${tagsUi(c)}
+      <span style="flex:1"></span>
+      ${copyBtn(c.id)}
+      <button class="tiny" onclick="setMin(${c.id},false)" title="expand">▸</button>
+    </div>
+   </div>`;
+}
+async function setMin(id,on){ await setCard(id,{min:on},true); }
 const insBar=at=>`<div class="ins">
     <button class="pb" onclick="pasteCard(${at})">+ paste</button>
     <button onclick="insertCard(${at},'speech')" title="insert an empty text card here">+ text</button>
@@ -1811,7 +1865,7 @@ function speechCard(c){return `
       ${tagsUi(c)}
       <span style="flex:1"></span>
       ${runonBtn(c)}
-      ${copyBtn(c.id)}
+      ${copyBtn(c.id)}${minBtn(c.id)}
       <label class="mut dchk" style="font-size:11px"><input type="checkbox" ${SEL.has(c.id)?'checked':''}
         onchange="pick(${c.id},this.checked)"> discuss</label>
     </div>
@@ -1856,7 +1910,7 @@ function audioCard(c){
       ${tagsUi(c)}
       <span style="flex:1"></span>
       ${runonBtn(c)}
-      ${copyBtn(c.id)}
+      ${copyBtn(c.id)}${minBtn(c.id)}
     </div>
     <div class="arow">
       <select onchange="setCard(${c.id},{clip:this.value},true)" style="max-width:230px">
@@ -1933,7 +1987,7 @@ function voicedCard(c){
       ${tagsUi(c)}
       <span style="flex:1"></span>
       ${runonBtn(c)}
-      ${copyBtn(c.id)}
+      ${copyBtn(c.id)}${minBtn(c.id)}
     </div>
     <div class="arow">
       <span class="lbl">you said</span>
@@ -1975,7 +2029,7 @@ function silenceCard(c){return `
       ${tagsUi(c)}
       <span style="flex:1"></span>
       ${runonBtn(c)}
-      ${copyBtn(c.id)}
+      ${copyBtn(c.id)}${minBtn(c.id)}
       <button class="tiny" onclick="mute(${c.id},${!c.mute})">${c.mute?'unmute':'mute'}</button>
       <button class="tiny" onclick="del(${c.id})" style="color:var(--red)" title="remove">×</button>
     </div>
@@ -2007,7 +2061,7 @@ function visualCard(c){
       ${c.mute?'<span class="pill warn">muted</span>':''}
       ${tagsUi(c)}
       <span style="flex:1"></span>
-      ${copyBtn(c.id)}
+      ${copyBtn(c.id)}${minBtn(c.id)}
     </div>
     <div class="arow">
       <select onchange="setCard(${c.id},{media:this.value},true)" style="max-width:230px">
@@ -2047,7 +2101,7 @@ function choiceCard(c){
       ${c.mute?'<span class="pill warn">muted</span>':''}
       ${tagsUi(c)}
       <span style="flex:1"></span>
-      ${copyBtn(c.id)}
+      ${copyBtn(c.id)}${minBtn(c.id)}
     </div>
     <div id="op${c.id}">${opts.map((o,i)=>optRow(c,o,i)).join('')}</div>
     <div class="act">
