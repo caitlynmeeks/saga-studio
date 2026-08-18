@@ -208,6 +208,34 @@ Only the first **6 seconds** shape cadence and the first **10** shape timbre
 - **Discuss** shells out to the Claude Code CLI with selected cards as context,
   if you have it installed. Entirely optional.
 
+## Stories that branch
+
+The same deck can be a visual novel. None of it costs the audiobook anything:
+tags, visuals and choices never enter a render hash, and assemble walks
+straight past them.
+
+- **Tags** — chips on any card. A label when you are organising; an anchor
+  when a choice jumps to one. A tag on two cards shows amber, because a jump
+  lands on the first and the second is probably a mistake.
+- **Visual cards** (`+ ⛶ visual`) — a picture or film from the **media** pool,
+  shown from that point until the next visual. Zero seconds on the audio
+  timeline. Film plays muted and holds its last frame; the soundtrack is the
+  cards around it.
+- **Choice cards** (`+ ⑂ choice`) — where interactive playback stops and asks.
+  Each option is a label, a tag to jump to (empty ends the story), flags to
+  set (`brave`, `!met_gertie`, `coins+1`, `coins=5`), and a condition under
+  which it is offered (`coins>=3`). **auto** takes the first passing option
+  silently — if/else and goto in one card. Any card can carry a **+when**
+  condition of its own and be skipped when it fails.
+- **The stage** (*stage ⧉* in the header) — a second window showing the
+  visuals, captions and the chooser, detachable onto another screen in the
+  desktop app. It owns playback; the editor highlights whichever card it is
+  speaking.
+- **Publish** (fourth sidebar tab) — three doors out: the **audiobook** MP3;
+  an **animatic** MP4 of the stills under the same audio; and a **web story**,
+  a folder of HTML that plays offline from a double-click — choices, flags,
+  visuals and all, nothing uploaded anywhere.
+
 ## Your material stays yours
 
 Voice clips and manuscripts live **outside the repo** by default:
