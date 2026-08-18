@@ -55,10 +55,46 @@ Only the first **6 seconds** shape cadence and the first **10** shape timbre
   sets ramp-in/ramp-out as percentages of the clip, and a volume slider sets
   its level under the voice. Clips are global like voices: import once, use in
   every episode.
+- **◎ Voiced cards** are spoken by you, in a character's voice. Import a
+  recording of yourself performing the line and Chatterbox re-speaks it as the
+  card's profile — keeping your timing, your rhythm and your delivery, changing
+  only the timbre. It is the card for a reading no slider will get you to: a
+  laugh, an interruption, a line that has to land on a particular beat. Press
+  **▶ yours** to check the take before spending a render on it.
+
+  There are no delivery settings, because voice conversion has none — the model
+  takes your recording and a voice and nothing else, so the profile's pace and
+  feeling sliders do nothing here. Takes are content-addressed: importing the
+  same recording twice costs nothing, and importing a second one never displaces
+  the first, so a card that has already rendered keeps the performance it was
+  rendered from. **⟳** re-rolls a voiced card exactly as it does a text one.
+- **Per-card delivery.** The **delivery** button on a text card opens a row with
+  the knobs *that card's engine actually has* — pace/feeling/steadiness/anti-stutter
+  on Chatterbox, speed/length on OmniVoice — plus an engine picker, so one line
+  can be spoken by the other model without a profile of its own. Overridden knobs
+  turn amber; **reset** puts the card back on its profile. An override renames
+  only that card's wav, so nothing else goes stale.
+
+  Every text card shows which engine it uses in its header, with a `*` when the
+  card sets it rather than the profile, and a `custom` pill when it overrides
+  delivery. With two engines in one document, that stopped being guessable.
+
+  **make profile…** in that row turns the card's current sound into a named
+  profile — tune one line until the character arrives, then keep her. The card
+  switches to the new profile and its overrides go away, and **nothing needs
+  re-baking**: the hash is made of the resolved numbers rather than the
+  profile's name, so a profile that resolves to what the card was already using
+  hashes to the same wav. A per-card `length` stays on the card, since a profile
+  has no field for it.
+- **⤶ runs on** removes the rest before a card, so a sentence split across two
+  cards is still one sentence. **Split does it for you** when the break is
+  mid-sentence — which is how a phrase gets its own delivery without a pause
+  appearing where you never wrote one. Splitting after a full stop leaves the
+  rest alone, because there you meant it.
 - **Silence cards** are a timed rest — half a second or half a minute.
 - **Insert and reorder.** Hover between any two cards for the insert strip
-  (+ paste · + text · + ♪ audio · + silence), and drag any card by its ⠿ grip
-  to move it. Both are undoable.
+  (+ paste · + text · + ◎ voiced · + ♪ audio · + silence), and drag any card by
+  its ⠿ grip to move it. Both are undoable.
 - **Copy a card, paste it anywhere.** **⧉** in a card's header copies it —
   words, profile, take, or a clip with its fades and timing — and **+ paste**
   in any insert strip drops it back, in this episode or another one. That is
@@ -71,6 +107,45 @@ Only the first **6 seconds** shape cadence and the first **10** shape timbre
   parameters, with a note about when to use it. Make a flat one for a character
   reading a machine log and a warm one for the same character in conversation,
   then pick per card. Profiles are global, so they work across every project.
+
+  Because a profile's numbers are part of every hash its cards render to,
+  changing one re-points every card that uses it. So edits are **held until you
+  press save**, and the cost is counted while you drag: *“651 rendered cards
+  would need re-baking · 4,945 cards use this profile, across 21 projects.”*
+  **Save as new…** keeps the old profile intact and puts your changes in a new
+  one instead.
+
+  Nothing about this is destructive. Renders are content-addressed and never
+  deleted, so the old audio stays on disk under its old name — **put it back**
+  restores the previous settings and every card that was rendered under them
+  goes green again immediately. A profile remembers its last ten settings.
+- **Move cards** between profiles: in a profile's editor, move every card in the
+  open episode — or just the ones on one other profile — across to it. That is
+  how a story written in Default becomes a story in Gertie's voice, without
+  touching what Default sounds like for everything else. Undoable with ⌘Z.
+- **Two engines.** Each profile picks one:
+  - **Chatterbox** — the original and the default. English, the four delivery
+    controls, and seeded takes. It is also the *only* engine that can speak a
+    ◎ voiced card, because it is the only one that does speech-to-speech, so
+    voiced cards use it whatever the profile says.
+  - **OmniVoice** — 600-odd languages and about **3× faster** (measured: 0.44×
+    realtime against Chatterbox's 1.48× on the same line). This is what the
+    Spanish editions are for. It has no pace/feeling/steadiness controls because
+    the model has none; it has a language and a speed instead. No seed either,
+    so a take still keeps its own file but re-rendering one will not reproduce it.
+
+  The engine is part of the render hash, so the same words in the same voice
+  never collide between engines — a chapter can't quietly end up half in each.
+  Chatterbox is the default everywhere, so nothing already rendered goes stale
+  until you deliberately move a profile across, and the impact dialog tells you
+  what that costs before you do.
+
+  OmniVoice runs in its own interpreter (`omnivoice_server.py`, started on demand
+  and held warm) because it and Chatterbox pin incompatible versions of
+  `transformers` and cannot share a virtualenv. Point `SAGA_OV_PYTHON` at that
+  interpreter; the default is `~/git/voice-studio/.venv-omnivoice/bin/python`.
+  If it is missing, the engine picker is simply disabled. Using both at once
+  costs about 5 GB resident.
 - **Cards fit their text.** Nothing is hidden below a fold by default; drag a
   card's corner to set a size of your own and it sticks, in either direction.
 - **↗** on a document, and **open renders folder** in the footer, show the
