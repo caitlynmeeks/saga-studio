@@ -139,7 +139,11 @@ Only the first **6 seconds** shape cadence and the first **10** shape timbre
   reference clip.
 
   It runs on the mix, not the render, so it is in no hash: it costs no re-bake,
-  and it applies to **both engines and to ◎ voiced cards alike** — the plugin
+  and the card's own **▶ in voice** button plays through it too, so what you hear
+  on a card is what the book will say. **▶ hear it** in the effects section plays
+  the profile's reference clip through the sliders as they stand — unsaved
+  changes included, which is the point of auditioning.
+  It applies to **both engines and to ◎ voiced cards alike** — the plugin
   never learns which model made the audio. Output is cached under a name made of
   the wav that went in and the settings that were on it, so the first mix after
   a change pays (~125x realtime) and every one after it is a file read. Note
