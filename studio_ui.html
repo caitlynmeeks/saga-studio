@@ -126,6 +126,16 @@ input[type=number]{width:62px}
 #log .me{color:var(--amber)}
 #ask{width:100%;height:64px;resize:vertical}
 .pill{font-size:10.5px;border:1px solid var(--line);border-radius:99px;padding:1px 7px;color:var(--faint)}
+/* Tag chips live in the card head. Quiet by default — a tag is a label until a
+   choice aims at it — and amber when the same tag is on two cards, because a
+   jump lands on the first and the second is probably a mistake. */
+.tags{display:flex;gap:3px;align-items:center;flex-wrap:wrap;min-width:0}
+.tag{font-size:10px;border:1px solid var(--line);border-radius:99px;padding:0 6px;
+color:var(--dim);white-space:nowrap}
+.tag i{font-style:normal;color:var(--faint);cursor:pointer;margin-left:3px}
+.tag i:hover{color:var(--red)}
+.tag.dup{color:var(--amber);border-color:var(--amber)}
+.tagin{width:92px;font-size:11px;padding:0 6px;border-radius:99px}
 button.tiny{padding:0 5px;font-size:12px;line-height:17px;border-color:transparent;color:var(--faint)}
 .proj:hover button.tiny{border-color:var(--line)}
 /* same bargain in a card header: invisible until the card is under the mouse,
@@ -306,6 +316,7 @@ body:not([data-tab=chat]) .dchk,body[data-panel=off] .dchk{display:none}
   <input type="file" id="arch" accept=".sagaproj" hidden>
   <input type="file" id="clipfile" accept="audio/*,.mp3,.wav,.flac,.m4a,.ogg,.aif,.aiff" hidden>
   <input type="file" id="perffile" accept="audio/*,.mp3,.wav,.flac,.m4a,.ogg,.aif,.aiff" hidden>
+  <datalist id="taglist"></datalist>
   <div id="bkmsg" class="mut" style="font-size:11px;margin-top:6px"></div>
  </div>
 
@@ -1486,6 +1497,7 @@ async function duplicateProfile(n){
 // strips sit between every pair of cards — and at both ends — so a new card can
 // be born exactly where it belongs.
 function renderDoc(){
+  tagCounts();                        // tagsUi reads TAGN for its dup warnings
   $('main').innerHTML=insBar(0)+DOC.chunks.map(c=>cardHTML(c)+insBar(c.id+1)).join('');
   DOC.chunks.forEach(c=>{ if(c.type==='audio')fadeUi(c.id); });
   bindDrag(); paintClip();          // the strips are new, so their paste buttons are too
@@ -1507,6 +1519,50 @@ const grip=id=>`<span class="grip" draggable="true" ondragstart="dragStart(event
 const copyBtn=id=>`<button class="tiny" id="cp${id}" onclick="copyCard(${id})"
   title="copy this card — then “+ paste” in any gap, in this episode or another">⧉</button>`;
 
+// ── tags ──────────────────────────────────────────────────
+// A tag is a label and, once choice cards aim at it, an anchor. TAGN is the
+// per-render count of each tag, so a chip can warn when its tag is on two
+// cards — a jump lands on the first, and the second is probably a mistake.
+let TAGN=new Map();
+function tagCounts(){
+  TAGN=new Map();
+  (DOC?DOC.chunks:[]).forEach(c=>(c.tags||[]).forEach(t=>TAGN.set(t,(TAGN.get(t)||0)+1)));
+  const dl=$('taglist');
+  if(dl)dl.innerHTML=[...TAGN.keys()].sort().map(t=>`<option value="${esc(t)}">`).join('');
+}
+const tagsUi=c=>`<span class="tags" id="tg${c.id}">${(c.tags||[]).map(t=>
+    `<span class="tag${(TAGN.get(t)||0)>1?' dup':''}"${(TAGN.get(t)||0)>1
+      ?' title="this tag is on more than one card — a jump lands on the first"':''
+    }>${esc(t)}<i onclick="rmTag(${c.id},'${esc(t)}')" title="remove this tag">×</i></span>`).join('')
+  }<button class="tiny" onclick="addTag(event,${c.id})"
+    title="tag this card — a label, and somewhere a choice can jump to">+tag</button></span>`;
+function addTag(ev,id){
+  const host=ev.target.parentElement;
+  if(host.querySelector('.tagin'))return;
+  const inp=document.createElement('input');
+  inp.className='tagin'; inp.placeholder='tag-name'; inp.setAttribute('list','taglist');
+  host.insertBefore(inp,ev.target);
+  let done=false;                     // Enter fires blur too; say it once
+  const fin=v=>{ if(done)return; done=true; inp.remove(); if(v.trim())saveTags(id,t=>[...t,v]); };
+  inp.onkeydown=e=>{ if(e.key==='Enter'){e.preventDefault();fin(inp.value)}
+                     if(e.key==='Escape'){e.preventDefault();fin('')} };
+  inp.onblur=()=>fin(inp.value);
+  inp.focus();
+}
+const rmTag=(id,t)=>saveTags(id,tags=>tags.filter(x=>x!==t));
+async function saveTags(id,fn){
+  const c=DOC&&DOC.chunks.find(x=>x.id===id); if(!c)return;
+  const tags=[...new Set(fn(c.tags||[])
+    .map(t=>String(t).toLowerCase().replace(/[^a-z0-9_-]/g,'').slice(0,24))
+    .filter(Boolean))];
+  await api('/api/chunk',{name:DOC.name,id,tags});
+  c.tags=tags; paintTags();
+}
+function paintTags(){
+  tagCounts();      // a removal elsewhere can clear another chip's dup warning
+  (DOC?DOC.chunks:[]).forEach(c=>{ const el=$('tg'+c.id); if(el)el.outerHTML=tagsUi(c); });
+}
+
 function speechCard(c){return `
    <div class="chunk ${SEL.has(c.id)?'sel':''} ${CUR===c.id?'cur':''}" id="c${c.id}"
      onmousedown="setCur(${c.id})" style="${c.mute?'opacity:.45':''}">
@@ -1523,6 +1579,7 @@ function speechCard(c){return `
       </select>
       <span class="engpill">${enginePill(c)}</span>
       ${c.mute?'<span class="pill warn">muted</span>':''}
+      ${tagsUi(c)}
       <span style="flex:1"></span>
       ${runonBtn(c)}
       ${copyBtn(c.id)}
@@ -1564,6 +1621,7 @@ function audioCard(c){
       <span class="pill">♪ audio</span>
       <span class="mut">${c.clip?esc(c.clip)+(len?' · '+fmtSecs(len):''):'no clip chosen'}</span>
       ${c.mute?'<span class="pill warn">muted</span>':''}
+      ${tagsUi(c)}
       <span style="flex:1"></span>
       ${runonBtn(c)}
       ${copyBtn(c.id)}
@@ -1640,6 +1698,7 @@ function voicedCard(c){
           `<option ${(c.profile||'Default')===p?'selected':''}>${p}</option>`).join('')}
       </select>
       ${c.mute?'<span class="pill warn">muted</span>':''}
+      ${tagsUi(c)}
       <span style="flex:1"></span>
       ${runonBtn(c)}
       ${copyBtn(c.id)}
@@ -1678,6 +1737,7 @@ function silenceCard(c){return `
         onchange="setCard(${c.id},{secs:parseFloat(this.value)||0})">
       <span class="mut" style="font-size:11px">seconds of rest</span>
       ${c.mute?'<span class="pill warn">muted</span>':''}
+      ${tagsUi(c)}
       <span style="flex:1"></span>
       ${runonBtn(c)}
       ${copyBtn(c.id)}

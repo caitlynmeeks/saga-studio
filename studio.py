@@ -405,6 +405,21 @@ def _num(v, dflt, lo, hi):
         return dflt
 
 
+def clean_tags(v):
+    """A card's tags, made safe. A tag is two things at once: a label you can
+    read down the deck, and — for choice cards — the anchor a jump lands on.
+    It is never part of any hash, because a tag changes nothing about how a
+    card sounds, so tagging is always free. Slug characters only: a tag gets
+    typed into option fields and compared by name, and case or whitespace
+    would quietly make two spellings of one anchor."""
+    out = []
+    for t in list(v or [])[:8]:
+        t = re.sub(r"[^a-z0-9_-]", "", str(t).lower())[:24]
+        if t and t not in out:
+            out.append(t)
+    return out
+
+
 def paste_card(src):
     """A fresh card built from a copied one.
 
@@ -466,6 +481,11 @@ def paste_card(src):
         c["mute"] = True
     if src.get("runon"):
         c["runon"] = True
+    # tags travel with a copy — but landing in another project they may collide
+    # with an anchor already there; the duplicate-tag chip is what says so
+    tags = clean_tags(src.get("tags"))
+    if tags:
+        c["tags"] = tags
     return c
 
 
@@ -1978,6 +1998,7 @@ class H(BaseHTTPRequestHandler):
                 return self._send(404, {"error": "no such project"})
             for c in doc["chunks"]:
                 c.setdefault("mute", False)
+                c.setdefault("tags", [])
                 if is_speech(c):
                     h = chunk_hash(c, doc)
                     c["hash"] = h
@@ -2339,6 +2360,8 @@ class H(BaseHTTPRequestHandler):
                             c["text"] = normalise(d["text"])
                         if "note" in d:
                             c["note"] = d["note"]
+                        if "tags" in d:
+                            c["tags"] = clean_tags(d["tags"])
                         if "profile" in d:
                             c["profile"] = d["profile"]
                         if "mute" in d:
@@ -2681,6 +2704,10 @@ class H(BaseHTTPRequestHandler):
                         a, b = c["text"][:d["at"]].strip(), c["text"][d["at"]:].strip()
                         out.append({**c, "text": a})
                         tail = {**c, "text": b, "note": ""}
+                        # a jump lands at the start of a card, and the start
+                        # stays with the head — copying the tags would make
+                        # every anchor on this card ambiguous
+                        tail.pop("tags", None)
                         # Splitting mid-sentence is how a phrase gets a delivery
                         # of its own, and the rest that normally follows a card
                         # would drop a pause into the middle of a sentence that
@@ -2707,7 +2734,14 @@ class H(BaseHTTPRequestHandler):
                     if (c["id"] == d["id"] and i + 1 < len(doc["chunks"])
                             and is_speech(c) and is_speech(doc["chunks"][i + 1])):
                         nxt = doc["chunks"][i + 1]
-                        out.append({**c, "text": f'{c["text"]} {nxt["text"]}'.strip()})
+                        merged = {**c, "text": f'{c["text"]} {nxt["text"]}'.strip()}
+                        # the vanished card's tags ride along rather than
+                        # dangle: a jump aimed at it should land here
+                        tags = clean_tags((c.get("tags") or [])
+                                          + (nxt.get("tags") or []))
+                        if tags:
+                            merged["tags"] = tags
+                        out.append(merged)
                         skip = True
                     else:
                         out.append(c)
