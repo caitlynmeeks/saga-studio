@@ -131,6 +131,22 @@ Only the first **6 seconds** shape cadence and the first **10** shape timbre
   the rest costs nothing, and the impact line says so: *0 cards would need
   re-baking*.
 
+  A profile can also run an **audio plugin** after the model — any VST3 or Audio
+  Unit installed on the machine. The sliders are built from whatever the plugin
+  reports its own parameters to be, so no plugin needs any code here and there is
+  no plugin window to manage. Pitch and formant shift are the levers neither
+  engine offers, and formant is what makes a second character out of one
+  reference clip.
+
+  It runs on the mix, not the render, so it is in no hash: it costs no re-bake,
+  and it applies to **both engines and to ◎ voiced cards alike** — the plugin
+  never learns which model made the audio. Output is cached under a name made of
+  the wav that went in and the settings that were on it, so the first mix after
+  a change pays (~125x realtime) and every one after it is a file read. Note
+  that a pitch shifter is never quite transparent even at neutral settings, so
+  the switch means what it says: off is off. Needs `pedalboard`; without it the
+  section simply does not appear.
+
   Nothing about this is destructive. Renders are content-addressed and never
   deleted, so the old audio stays on disk under its old name — **put it back**
   restores the previous settings and every card that was rendered under them
