@@ -1629,6 +1629,8 @@ function cardMenu(e,id){
        ctxAsk(c.label||'','Maisie discovers the plan','name',v=>setCard(id,{label:v},true)); }},
   ];
   if(c.label)items.push({label:'clear the name', run:()=>setCard(id,{label:''},true)});
+  items.push({label:c.locked?'unlock':'lock',
+    run:()=>setCard(id,{locked:!c.locked},true)});
   items.push('-',{label:'copy', run:()=>copyCard(id)});
   openCtx(e,items);
 }
@@ -1745,7 +1747,6 @@ function minCard(c){
       <span class="dot ${c.mute?'':(c.ready?'ready':'stale')}"></span>
       <span>#${c.id}</span>
       <span class="cardname" title="right-click to name this card">${esc(cardName(c))}</span>
-      ${c.locked?'<span class="pill" title="locked — right-click to unlock">🔒</span>':''}
       ${c.mute?'<span class="pill warn">muted</span>':''}
       ${tagsUi(c)}
       <span style="flex:1"></span>
@@ -1780,7 +1781,9 @@ function tagCounts(){
   const dl=$('taglist');
   if(dl)dl.innerHTML=[...TAGN.keys()].sort().map(t=>`<option value="${esc(t)}">`).join('');
 }
-const tagsUi=c=>`<span class="tags" id="tg${c.id}">${(c.tags||[]).map(t=>
+const tagsUi=c=>`<span class="tags" id="tg${c.id}">${
+  c.locked?'<span class="pill" title="locked — right-click the header to unlock">🔒</span>':''
+  }${(c.tags||[]).map(t=>
     `<span class="tag${(TAGN.get(t)||0)>1?' dup':''}"${(TAGN.get(t)||0)>1
       ?' title="this tag is on more than one card — a jump lands on the first"':''
     }>${esc(t)}<i onclick="rmTag(${c.id},'${esc(t)}')" title="remove this tag">×</i></span>`).join('')
@@ -1870,7 +1873,7 @@ function speechCard(c){return `
         onchange="pick(${c.id},this.checked)"> discuss</label>
     </div>
     <textarea id="t${c.id}" oninput="touched(${c.id})" onblur="flush(${c.id})"
-      onfocus="setCur(${c.id})"${(HEIGHT[c.id]||c.height)?` style="height:${HEIGHT[c.id]||c.height}px"`:''}>${esc(c.text)}</textarea>
+      onfocus="setCur(${c.id})"${c.locked?' readonly':''}${(HEIGHT[c.id]||c.height)?` style="height:${HEIGHT[c.id]||c.height}px"`:''}>${esc(c.text)}</textarea>
     ${(SUBS.has(c.id)||c.sub)?subRow(c):''}
     ${DELIV.has(c.id)?delivRow(c):''}
     <div class="act">
@@ -2733,6 +2736,8 @@ async function dup(id){ await flushAll();
   await api('/api/duplicate',{name:DOC.name,id}); open_(DOC.name,true,id); }
 async function del(id){
   const c=DOC.chunks.find(x=>x.id===id);
+  if(c&&c.locked)return void($('status').innerHTML=
+    '<span class="warn">that card is locked</span> — right-click its header to unlock it');
   const what=c.type==='audio'?`♪ audio card — ${c.clip||'no clip chosen'}`
     :c.type==='silence'?`${c.secs==null?1:c.secs}s of silence`
     :c.type==='voiced'?`◎ voiced — ${c.perfname||'no recording yet'}`
@@ -2907,6 +2912,8 @@ async function copyCard(id){
   if(c.tags&&c.tags.length)CLIP.tags=c.tags;
   if(c.sub)CLIP.sub=c.sub;
   if(c.when)CLIP.when=c.when;
+  if(c.locked)CLIP.locked=true;
+  if(c.label)CLIP.label=c.label;
   if(CLIP.type==='audio')Object.assign(CLIP,
     {clip:c.clip||'', mode:c.mode||'full', after:c.after, fade:c.fade, gain:c.gain});
   else if(CLIP.type==='silence')CLIP.secs=c.secs;

@@ -548,6 +548,8 @@ def paste_card(src):
     label = str(src.get("label") or "")[:80]
     if label:
         c["label"] = label
+    if src.get("locked"):
+        c["locked"] = True
     return c
 
 
@@ -2858,6 +2860,19 @@ class H(BaseHTTPRequestHandler):
                 snapshot(doc, "edit card")
                 for c in doc["chunks"]:
                     if c["id"] == d["id"]:
+                        # The lock, enforced where every edit lands rather than
+                        # in whichever controls remember to ask. Presentation
+                        # still moves — collapsing, naming, resizing a locked
+                        # card changes how it sits, not what it says — and
+                        # unlocking is its own request, never a rider on an
+                        # edit that would then slip through with it.
+                        if (c.get("locked")
+                                and set(d) - {"name", "id", "locked",
+                                              "min", "height", "label"}):
+                            return self._send(400, {"error": "that card is locked "
+                                              "— right-click its header to unlock it"})
+                        if "locked" in d:
+                            c["locked"] = bool(d["locked"])
                         if "text" in d:
                             c["text"] = normalise(d["text"])
                         if "note" in d:
@@ -3018,6 +3033,10 @@ class H(BaseHTTPRequestHandler):
 
             if u.path == "/api/remove":
                 doc = load(d["name"])
+                gone = next((c for c in doc["chunks"] if c["id"] == d["id"]), None)
+                if gone is not None and gone.get("locked"):
+                    return self._send(400, {"error": "that card is locked — "
+                                            "unlock it before removing it"})
                 snapshot(doc, "remove card")
                 doc["chunks"] = [c for c in doc["chunks"] if c["id"] != d["id"]]
                 for i, c in enumerate(doc["chunks"]):
@@ -3133,7 +3152,7 @@ class H(BaseHTTPRequestHandler):
                 snapshot(doc, f"move cards to “{dst}”")
                 moved = 0
                 for c in doc["chunks"]:
-                    if not is_renderable(c):
+                    if not is_renderable(c) or c.get("locked"):
                         continue
                     if ids is not None and c["id"] not in ids:
                         continue
@@ -3162,7 +3181,8 @@ class H(BaseHTTPRequestHandler):
 
                 hits, stale_now, hitcount = [], 0, 0
                 for c in doc["chunks"]:
-                    if not is_speech(c):
+                    # a locked card's words are exactly what the lock protects
+                    if not is_speech(c) or c.get("locked"):
                         continue
                     new, n = pat.subn(repl, c["text"])
                     if not n:
@@ -3234,6 +3254,9 @@ class H(BaseHTTPRequestHandler):
                 snapshot(doc, "split")
                 out = []
                 for c in doc["chunks"]:
+                    if c["id"] == d["id"] and c.get("locked"):
+                        return self._send(400, {"error": "that card is locked — "
+                                                "unlock it before splitting it"})
                     if c["id"] == d["id"] and is_speech(c) and 0 < d["at"] < len(c["text"]):
                         a, b = c["text"][:d["at"]].strip(), c["text"][d["at"]:].strip()
                         out.append({**c, "text": a})
@@ -3265,6 +3288,11 @@ class H(BaseHTTPRequestHandler):
                     if skip:
                         skip = False
                         continue
+                    if (c["id"] == d["id"] and i + 1 < len(doc["chunks"])
+                            and (c.get("locked")
+                                 or doc["chunks"][i + 1].get("locked"))):
+                        return self._send(400, {"error": "a locked card cannot "
+                                                "be merged — unlock it first"})
                     if (c["id"] == d["id"] and i + 1 < len(doc["chunks"])
                             and is_speech(c) and is_speech(doc["chunks"][i + 1])):
                         nxt = doc["chunks"][i + 1]
