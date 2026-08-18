@@ -237,7 +237,9 @@ function tick(){
     for(let k=0;k<=i;k++){ const x=card(MARKS[k].id);
       if(x&&x.type==='visual'&&x.ready)vis=x; }
     if(vis)show(vis);
-    caption((c.type||'speech')==='speech'?c.text:'');
+    // the subtitle wins over the spoken text — "Teide" on screen while the
+    // booth was fed "tay-dee" — and it is the only words a voiced card has
+    caption(c.sub||((c.type||'speech')==='speech'?c.text:''));
   }
   say({type:'playing',card:MARKS[i].id});
 }

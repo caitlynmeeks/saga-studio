@@ -144,6 +144,8 @@ color:var(--dim);white-space:nowrap}
 .opt .olabel{flex:2;min-width:90px}
 .opt .oscript{flex:1;min-width:70px;font-size:11px;color:var(--dim)}
 .opt select{max-width:150px;font-size:11px}
+/* what the stage shows, when it differs from what is spoken */
+.subrow input{flex:1;color:var(--bright)}
 button.tiny{padding:0 5px;font-size:12px;line-height:17px;border-color:transparent;color:var(--faint)}
 .proj:hover button.tiny{border-color:var(--line)}
 /* same bargain in a card header: invisible until the card is under the mouse,
@@ -1815,6 +1817,7 @@ function speechCard(c){return `
     </div>
     <textarea id="t${c.id}" oninput="touched(${c.id})" onblur="flush(${c.id})"
       onfocus="setCur(${c.id})"${(HEIGHT[c.id]||c.height)?` style="height:${HEIGHT[c.id]||c.height}px"`:''}>${esc(c.text)}</textarea>
+    ${(SUBS.has(c.id)||c.sub)?subRow(c):''}
     ${DELIV.has(c.id)?delivRow(c):''}
     <div class="act">
       <button id="pf${c.id}" onclick="playFull(${c.id})" ${c.ready&&!c.mute?'':'disabled'}>▶ full</button>
@@ -1824,6 +1827,8 @@ function speechCard(c){return `
       <button id="dv${c.id}" class="${Object.keys(c.params||{}).length?'dirty':''}"
         onclick="toggleDeliv(${c.id})"
         title="change the engine or the delivery for this one card only">delivery</button>
+      <button id="sub${c.id}" class="${(c.sub||'').trim()?'dirty':''}" onclick="toggleSub(${c.id})"
+        title="what the stage shows, when that differs from what is spoken — Teide on screen, tay-dee in the booth">subtitle</button>
       <button onclick="splitAt(${c.id})">split</button>
       <button onclick="merge(${c.id})">merge next</button>
       <button onclick="dup(${c.id})">duplicate</button>
@@ -1938,12 +1943,15 @@ function voicedCard(c){
       <button id="pk${c.id}" onclick="playPerf(${c.id})" ${c.haveperf?'':'disabled'}
         title="hear your own recording, before conversion">▶ yours</button>
     </div>
+    ${(SUBS.has(c.id)||c.sub)?subRow(c):''}
     <div class="act">
       <button id="pf${c.id}" onclick="playFull(${c.id})" ${c.ready&&!c.mute?'':'disabled'}
         title="hear it in the character's voice">▶ in voice</button>
       <button id="rb${c.id}" class="pri" onclick="one(${c.id})"
         ${c.mute||!c.haveperf?'disabled':''}>render</button>
       ${takeUi(c)}
+      <button id="sub${c.id}" class="${(c.sub||'').trim()?'dirty':''}" onclick="toggleSub(${c.id})"
+        title="a voiced card has no prose — this is what the stage shows while your performance plays">subtitle</button>
       <button onclick="dup(${c.id})">duplicate</button>
       <button onclick="mute(${c.id},${!c.mute})">${c.mute?'unmute':'mute'}</button>
       <button onclick="del(${c.id})" style="color:var(--red)">remove</button>
@@ -2396,6 +2404,42 @@ async function setRunon(id,on){
 // disappointed. Same reason the engine is on the card header at all: with two
 // engines in one document, "which one spoke this?" stopped being obvious.
 let DELIV=new Set();
+// ── subtitles ─────────────────────────────────────────────
+// The card's text is what the model SPEAKS; the subtitle is what the stage
+// SHOWS. They part company exactly when you misspell a word on purpose so the
+// actor pronounces it — "tay-dee" spoken, "Teide" shown — and on a voiced
+// card, which has a performance and no prose at all. Display only, in no
+// hash: captioning a finished book re-renders nothing.
+let SUBS=new Set();
+function subRow(c){
+  return `<div class="arow subrow" id="sb${c.id}">
+    <span class="lbl">shown</span>
+    <input value="${esc(c.sub||'')}" placeholder="${c.type==='voiced'
+      ?'what the stage shows while this performance plays'
+      :'what the stage shows — the card’s text is what is spoken'}"
+      onchange="setCard(${c.id},{sub:this.value});paintSubBtn(${c.id},this.value)">
+  </div>`;
+}
+function toggleSub(id){
+  const row=$('sb'+id);
+  if(row){
+    const c=DOC&&DOC.chunks.find(x=>x.id===id);
+    // a card WITH a subtitle keeps its row — emptying the field is how a
+    // subtitle goes away, and hiding a set one would look like losing it
+    if(c&&c.sub)return void row.querySelector('input').focus();
+    row.remove(); SUBS.delete(id); return;
+  }
+  const c=DOC&&DOC.chunks.find(x=>x.id===id); if(!c)return;
+  SUBS.add(id);
+  const act=document.querySelector('#c'+id+' .act');
+  if(act)act.insertAdjacentHTML('beforebegin', subRow(c));
+  const inp=document.querySelector('#sb'+id+' input');
+  if(inp)inp.focus();
+}
+function paintSubBtn(id,v){
+  const b=$('sub'+id);
+  if(b)b.classList.toggle('dirty',!!(v||'').trim());
+}
 const ENGLABEL={chatterbox:'Chatterbox', omnivoice:'OmniVoice'};
 function enginePill(c){
   const e=(c.effective||{}).engine||'chatterbox', own=c.params||{};
@@ -2678,7 +2722,9 @@ const fmtSecs=s=>s>=60?`${Math.floor(s/60)}:${String(Math.round(s%60)).padStart(
 // name); sliders and radios keep their own DOM, so a sync is enough and the
 // control never vanishes mid-drag
 async function setCard(id,patch,rebuild){
-  await api('/api/chunk',{name:DOC.name,id,...patch});
+  const r=await api('/api/chunk',{name:DOC.name,id,...patch});
+  // a refusal — a locked card, mostly — must be seen, or the control looks broken
+  if(r.error)$('status').innerHTML=`<span class="warn">${esc(r.error)}</span>`;
   if(rebuild)open_(DOC.name,true,id); else await syncCards();
 }
 function fadeUi(id){
@@ -2805,6 +2851,8 @@ async function copyCard(id){
   const c=(DOC.chunks.find(x=>x.id===id))||was;
   CLIP={type:c.type||'speech', mute:!!c.mute, runon:!!c.runon, from:`${DOC.title} #${id}`};
   if(c.tags&&c.tags.length)CLIP.tags=c.tags;
+  if(c.sub)CLIP.sub=c.sub;
+  if(c.when)CLIP.when=c.when;
   if(CLIP.type==='audio')Object.assign(CLIP,
     {clip:c.clip||'', mode:c.mode||'full', after:c.after, fade:c.fade, gain:c.gain});
   else if(CLIP.type==='silence')CLIP.secs=c.secs;

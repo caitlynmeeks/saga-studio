@@ -180,7 +180,7 @@ function tick(){
     for(let k=0;k<=i;k++){ const x=BYID.get(MARKS[k].id);
       if(x&&x.type==='visual')vis=x; }
     if(vis)show(vis);
-    caption((c.type||'speech')==='speech'?c.text:'');
+    caption(c.sub||((c.type||'speech')==='speech'?c.text:''));
   }
 }
 const fmt=s=>{ s=Math.floor(s||0); return Math.floor(s/60)+':'+String(s%60).padStart(2,'0'); };

@@ -541,6 +541,10 @@ def paste_card(src):
     w = clean_when(src.get("when"))
     if w:
         c["when"] = w
+    # and its subtitle — the shown words belong to the card like the spoken ones
+    sub = str(src.get("sub") or "")[:500]
+    if sub:
+        c["sub"] = sub
     return c
 
 
@@ -2202,7 +2206,7 @@ def _export_chunk(c):
     out = {"id": c["id"], "type": c.get("type", "speech")}
     if is_speech(c):
         out["text"] = c["text"]
-    for k in ("tags", "when", "auto", "mute", "media", "mediakind"):
+    for k in ("tags", "when", "auto", "mute", "media", "mediakind", "sub"):
         if c.get(k):
             out[k] = c[k]
     if c.get("type") == "choice":
@@ -2857,6 +2861,13 @@ class H(BaseHTTPRequestHandler):
                             c["note"] = d["note"]
                         if "tags" in d:
                             c["tags"] = clean_tags(d["tags"])
+                        if "sub" in d:
+                            # What the stage SHOWS while the card plays, when
+                            # that differs from what is spoken — "Teide" on
+                            # screen while the model is fed "tay-dee", or any
+                            # words at all for a voiced card. Display only:
+                            # never in any hash, so captioning costs nothing.
+                            c["sub"] = str(d["sub"] or "")[:500]
                         if "when" in d:        # plays only when this holds
                             c["when"] = clean_when(d["when"])
                         # choice-card fields, validated against the grammar —
