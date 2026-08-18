@@ -2056,6 +2056,11 @@ class H(BaseHTTPRequestHandler):
             return self.wfile.write(body)
         if u.path == "/":
             return self._send(200, (HERE / "studio_ui.html").read_bytes(), "text/html; charset=utf-8")
+        if u.path == "/stage":
+            # the audience's window: visuals, captions and — for stories with
+            # choice cards — the chooser. Read from disk per request like the
+            # editor page, so a reload picks up front-end changes.
+            return self._send(200, (HERE / "stage_ui.html").read_bytes(), "text/html; charset=utf-8")
         if u.path == "/api/state":
             pcounts, ccounts, mcounts = library_counts()
             return self._send(200, {
