@@ -414,6 +414,41 @@ def _num(v, dflt, lo, hi):
         return dflt
 
 
+# The choice grammar, validated here and NEVER evaluated here. One evaluator
+# exists — in player.js, shared by the stage and the HTML export — and Python
+# only keeps garbage from reaching it. State is a flat {name: number} map;
+# flags are 0/1. A set op is `flag`, `!flag`, `coins+2`, `coins-1` or
+# `coins=5`; a condition is `flag`, `!flag` or `coins>=3` (any of == != >= <=
+# > <). Whitespace is stripped on the way in so the evaluator parses one
+# spelling. What fails the shape is dropped, never a 500 — the same posture
+# an edit's params get.
+SET_RE = re.compile(r"^(!?[a-z][a-z0-9_]{0,23}|[a-z][a-z0-9_]{0,23}[+\-=]\d{1,4})$")
+WHEN_RE = re.compile(r"^!?[a-z][a-z0-9_]{0,23}((==|!=|>=|<=|>|<)-?\d{1,4})?$")
+
+
+def clean_when(v):
+    w = re.sub(r"\s+", "", str(v or ""))
+    return w if WHEN_RE.match(w) else ""
+
+
+def clean_options(v):
+    """A choice card's options, made safe. `goto` is a tag, and gets exactly a
+    tag's sanitising; empty goto means the story ends there."""
+    out = []
+    for o in list(v or [])[:6]:
+        if not isinstance(o, dict):
+            continue
+        out.append({
+            "label": str(o.get("label") or "")[:120],
+            "goto": re.sub(r"[^a-z0-9_-]", "", str(o.get("goto") or "").lower())[:24],
+            "set": [s for s in (re.sub(r"\s+", "", str(x))
+                                for x in list(o.get("set") or [])[:8])
+                    if SET_RE.match(s)],
+            "when": clean_when(o.get("when")),
+        })
+    return out
+
+
 def clean_tags(v):
     """A card's tags, made safe. A tag is two things at once: a label you can
     read down the deck, and — for choice cards — the anchor a jump lands on.
@@ -462,6 +497,9 @@ def paste_card(src):
         c = {"id": 0, "type": "visual",
              "media": re.sub(r"[^a-z0-9_-]", "", str(src.get("media") or "")),
              "note": ""}
+    elif kind == "choice":
+        c = {"id": 0, "type": "choice", "auto": bool(src.get("auto")),
+             "options": clean_options(src.get("options")), "note": ""}
     elif kind == "voiced":
         # `perf` is a checksum this program wrote, so it is hex and nothing
         # else; `perfname` is only what to call it on screen.
@@ -499,6 +537,10 @@ def paste_card(src):
     tags = clean_tags(src.get("tags"))
     if tags:
         c["tags"] = tags
+    # so does a card's condition: "plays only when" is part of what was copied
+    w = clean_when(src.get("when"))
+    if w:
+        c["when"] = w
     return c
 
 
@@ -1783,7 +1825,7 @@ def chime_wave(sr):
     return (tone * env * 0.13).unsqueeze(0)
 
 
-def mixdown(doc, gap=0.35, frm=None, chime=False):
+def mixdown(doc, gap=0.35, frm=None, upto=None, chime=False):
     """Mix every card onto one timeline; (audio, sample_rate, missing, marks) back.
 
     `marks` is where each card starts, in seconds — [{"id", "at"}, …]. The
@@ -1822,6 +1864,15 @@ def mixdown(doc, gap=0.35, frm=None, chime=False):
         i = next((k for k, c in enumerate(cards) if c["id"] == frm), None)
         if i is not None:
             cards = cards[i:]
+    # `upto` is exclusive — the timeline runs to the card before it, which is
+    # how interactive playback speaks exactly one stretch between two stops.
+    # A bed opened inside the stretch still plays out its tail (the total
+    # honours every piece), so music carries under the chooser rather than
+    # being cut off mid-bar.
+    if upto is not None:
+        j = next((k for k, c in enumerate(cards) if c["id"] == upto), None)
+        if j is not None:
+            cards = cards[:j]
     events, cursor, missing, marks = [], 0.0, 0, []
     # The rest between cards is added *after* the card that earns it, so a card
     # that runs on has to reach back and take it off again. Hence remembering
@@ -1961,16 +2012,17 @@ def assemble(name, gap=0.35):
     return wav, missing
 
 
-def preview_book(name, frm=None):
+def preview_book(name, frm=None, upto=None):
     """The same mixdown assemble() ships, parked in a dotfile the browser can
     stream — hearing the whole book should not overwrite the mp3 in out/.
     16-bit is plenty for ears and halves what goes over the wire; the Finder
     never shows the file, and export never packs out/.
 
     `frm` starts the mix at a card instead of at the top, so an edit in chapter
-    nine costs nine seconds to hear rather than the eight minutes before it."""
+    nine costs nine seconds to hear rather than the eight minutes before it.
+    `upto` stops it before a card — the stage plays choice-to-choice with it."""
     import torchaudio as ta
-    full, sr, missing, marks = mixdown(load(name), frm=frm, chime=True)
+    full, sr, missing, marks = mixdown(load(name), frm=frm, upto=upto, chime=True)
     if full is None:
         return None, 0, missing, []
     out = pdir(name) / "out"
@@ -2061,6 +2113,11 @@ class H(BaseHTTPRequestHandler):
             # choice cards — the chooser. Read from disk per request like the
             # editor page, so a reload picks up front-end changes.
             return self._send(200, (HERE / "stage_ui.html").read_bytes(), "text/html; charset=utf-8")
+        if u.path == "/player.js":
+            # the choice grammar's one evaluator, shared by the stage and the
+            # HTML export — see the file's own preamble for why it is alone
+            return self._send(200, (HERE / "player.js").read_bytes(),
+                              "text/javascript; charset=utf-8")
         if u.path == "/api/state":
             pcounts, ccounts, mcounts = library_counts()
             return self._send(200, {
@@ -2143,6 +2200,10 @@ class H(BaseHTTPRequestHandler):
                         f = None
                     c["ready"] = f is not None
                     c["mediakind"] = media_kind(f) if f else ""
+                elif c["type"] == "choice":
+                    c["ready"] = True          # nothing to render, ever
+                    c.setdefault("options", [])
+                    c.setdefault("auto", False)
                 else:                          # silence has nothing to render
                     c["ready"] = True
             return self._send(200, doc)
@@ -2535,6 +2596,14 @@ class H(BaseHTTPRequestHandler):
                             c["note"] = d["note"]
                         if "tags" in d:
                             c["tags"] = clean_tags(d["tags"])
+                        if "when" in d:        # plays only when this holds
+                            c["when"] = clean_when(d["when"])
+                        # choice-card fields, validated against the grammar —
+                        # the shape discipline params get, for the same reason
+                        if "options" in d:
+                            c["options"] = clean_options(d["options"])
+                        if "auto" in d:
+                            c["auto"] = bool(d["auto"])
                         if "profile" in d:
                             c["profile"] = d["profile"]
                         if "mute" in d:
@@ -2600,6 +2669,13 @@ class H(BaseHTTPRequestHandler):
                     c = {"id": 0, "type": "silence", "secs": 1.0, "note": ""}
                 elif kind == "visual":
                     c = {"id": 0, "type": "visual", "media": "", "note": ""}
+                elif kind == "choice":
+                    # two blank options, because a choice is usually a fork —
+                    # and a chooser with one button is a button
+                    c = {"id": 0, "type": "choice", "auto": False,
+                         "options": [{"label": "", "goto": "", "set": [], "when": ""},
+                                     {"label": "", "goto": "", "set": [], "when": ""}],
+                         "note": ""}
                 elif kind == "voiced":
                     c = {"id": 0, "type": "voiced", "perf": "", "perfname": "",
                          "note": ""}
@@ -2954,9 +3030,10 @@ class H(BaseHTTPRequestHandler):
                 return self._send(200, {"ok": bool(f), "file": str(f) if f else None,
                                         "missing": missing})
             if u.path == "/api/book_preview":
-                frm = d.get("from")
+                frm, upto = d.get("from"), d.get("upto")
                 f, secs, missing, marks = preview_book(
-                    d["name"], None if frm is None else int(frm))
+                    d["name"], None if frm is None else int(frm),
+                    None if upto is None else int(upto))
                 return self._send(200, {"ok": bool(f), "secs": secs,
                                         "missing": missing, "from": frm,
                                         "marks": marks})

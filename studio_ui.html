@@ -136,6 +136,13 @@ color:var(--dim);white-space:nowrap}
 .tag i:hover{color:var(--red)}
 .tag.dup{color:var(--amber);border-color:var(--amber)}
 .tagin{width:92px;font-size:11px;padding:0 6px;border-radius:99px}
+.tag.whenc{color:var(--amber);border-color:#4a3d22;cursor:pointer}
+/* a choice card's option rows: what the listener sees, where it goes, what it
+   sets, and when it is offered at all */
+.opt{display:flex;gap:6px;align-items:center;padding:5px 9px;border-bottom:1px solid var(--line)}
+.opt .olabel{flex:2;min-width:90px}
+.opt .oscript{flex:1;min-width:70px;font-size:11px;color:var(--dim)}
+.opt select{max-width:150px;font-size:11px}
 button.tiny{padding:0 5px;font-size:12px;line-height:17px;border-color:transparent;color:var(--faint)}
 .proj:hover button.tiny{border-color:var(--line)}
 /* same bargain in a card header: invisible until the card is under the mouse,
@@ -1625,6 +1632,7 @@ const insBar=at=>`<div class="ins">
     <button onclick="insertCard(${at},'voiced')" title="insert a card spoken by you, in a character's voice">+ ◎ voiced</button>
     <button onclick="insertCard(${at},'audio')" title="insert a music / sound-effect card here">+ ♪ audio</button>
     <button onclick="insertCard(${at},'visual')" title="insert a picture or film — the stage shows it from here until the next visual">+ ⛶ visual</button>
+    <button onclick="insertCard(${at},'choice')" title="insert a choice — the stage stops here and asks; the audiobook walks straight past">+ ⑂ choice</button>
     <button onclick="insertCard(${at},'silence')" title="insert a timed pause here">+ silence</button>
   </div>`;
 const grip=id=>`<span class="grip" draggable="true" ondragstart="dragStart(event,${id})"
@@ -1647,8 +1655,13 @@ const tagsUi=c=>`<span class="tags" id="tg${c.id}">${(c.tags||[]).map(t=>
     `<span class="tag${(TAGN.get(t)||0)>1?' dup':''}"${(TAGN.get(t)||0)>1
       ?' title="this tag is on more than one card — a jump lands on the first"':''
     }>${esc(t)}<i onclick="rmTag(${c.id},'${esc(t)}')" title="remove this tag">×</i></span>`).join('')
+  }${c.when?`<span class="tag whenc" onclick="editWhen(event,${c.id})"
+    title="plays only when ${esc(c.when)} holds — click to edit">?${esc(c.when)
+    }<i onclick="event.stopPropagation();saveWhen(${c.id},'')" title="always play it">×</i></span>`:''
   }<button class="tiny" onclick="addTag(event,${c.id})"
-    title="tag this card — a label, and somewhere a choice can jump to">+tag</button></span>`;
+    title="tag this card — a label, and somewhere a choice can jump to">+tag</button>${
+  c.when?'':`<button class="tiny" onclick="editWhen(event,${c.id})"
+    title="play this card only when a condition holds — brave, !met_gertie, coins>=3">+when</button>`}</span>`;
 function addTag(ev,id){
   const host=ev.target.parentElement;
   if(host.querySelector('.tagin'))return;
@@ -1674,6 +1687,34 @@ async function saveTags(id,fn){
 function paintTags(){
   tagCounts();      // a removal elsewhere can clear another chip's dup warning
   (DOC?DOC.chunks:[]).forEach(c=>{ const el=$('tg'+c.id); if(el)el.outerHTML=tagsUi(c); });
+}
+// ── a card's condition ────────────────────────────────────
+// "plays only when" — the other half of what a choice's set ops are for. The
+// grammar's evaluator lives in player.js alone; this only edits the string,
+// and the server drops what fails the shape.
+function editWhen(ev,id){
+  const host=ev.target.closest('.tags');
+  if(!host||host.querySelector('.tagin'))return;
+  const c=DOC&&DOC.chunks.find(x=>x.id===id); if(!c)return;
+  const inp=document.createElement('input');
+  inp.className='tagin'; inp.placeholder='coins>=3'; inp.value=c.when||'';
+  inp.style.width='110px';
+  host.appendChild(inp);
+  let done=false;
+  const fin=(v,keep)=>{ if(done)return; done=true; inp.remove(); if(keep)saveWhen(id,v); };
+  inp.onkeydown=e=>{ if(e.key==='Enter'){e.preventDefault();fin(inp.value,true)}
+                     if(e.key==='Escape'){e.preventDefault();fin('',false)} };
+  inp.onblur=()=>fin(inp.value,true);
+  inp.focus(); inp.select();
+}
+async function saveWhen(id,v){
+  await api('/api/chunk',{name:DOC.name,id,when:v});
+  await syncCards();
+  const now=(DOC.chunks.find(x=>x.id===id)||{}).when||'';
+  if(v.replace(/\s+/g,'')&&!now)
+    $('status').innerHTML='<span class="warn">that condition failed the grammar</span>'+
+      ' — try <b>brave</b>, <b>!met_gertie</b> or <b>coins&gt;=3</b>';
+  paintTags();
 }
 
 function speechCard(c){return `
@@ -1902,6 +1943,108 @@ function visualCard(c){
       <span class="mut" id="s${c.id}" style="font-size:11px"></span>
     </div>
    </div>`;
+}
+
+// Where interactive playback stops and asks. Each option is four things: what
+// the listener sees, the tag it jumps to (empty = the end), the flags it sets,
+// and the condition under which it is offered at all. `auto` skips the chooser
+// and takes the first option whose condition passes — if/else and goto in one
+// card. The audiobook walks straight past all of it.
+function choiceCard(c){
+  const opts=c.options||[];
+  return `
+   <div class="chunk ${CUR===c.id?'cur':''}" id="c${c.id}"
+     onmousedown="setCur(${c.id})" style="${c.mute?'opacity:.45':''}">
+    <div class="top">
+      ${grip(c.id)}
+      <span class="dot ready"></span>
+      <span>#${c.id}</span>
+      <span class="pill">⑂ choice</span>
+      <label class="mut" style="font-size:11px"
+        title="no chooser: the first option whose condition passes is taken silently — if/else in one card">
+        <input type="checkbox" ${c.auto?'checked':''} onchange="setAuto(${c.id},this.checked)"> auto</label>
+      ${c.mute?'<span class="pill warn">muted</span>':''}
+      ${tagsUi(c)}
+      <span style="flex:1"></span>
+      ${copyBtn(c.id)}
+    </div>
+    <div id="op${c.id}">${opts.map((o,i)=>optRow(c,o,i)).join('')}</div>
+    <div class="act">
+      <button onclick="addOption(${c.id})">+ option</button>
+      <span class="mut" id="ah${c.id}" style="font-size:11px">${
+        c.auto?'first passing option is taken silently':'the stage stops here and asks'}</span>
+      <span style="flex:1"></span>
+      <button onclick="mute(${c.id},${!c.mute})">${c.mute?'unmute':'mute'}</button>
+      <button onclick="del(${c.id})" style="color:var(--red)">remove</button>
+      <span class="mut" id="s${c.id}" style="font-size:11px"></span>
+    </div>
+   </div>`;
+}
+function optRow(c,o,i){
+  const tags=[...TAGN.keys()].sort();
+  const dangling=o.goto&&!TAGN.has(o.goto);
+  return `<div class="opt">
+    <input class="olabel" value="${esc(o.label)}" placeholder="what the listener sees…"
+      onchange="setOption(${c.id},${i},'label',this.value)">
+    <span class="mut">→</span>
+    <select onchange="setOption(${c.id},${i},'goto',this.value)"
+      title="the tagged card this option jumps to — empty ends the story">
+      <option value="">(the end)</option>
+      ${tags.map(t=>`<option value="${esc(t)}" ${t===o.goto?'selected':''}>${esc(t)}</option>`).join('')}
+      ${dangling?`<option value="${esc(o.goto)}" selected>${esc(o.goto)} (missing)</option>`:''}
+    </select>
+    ${dangling?'<span class="warn" title="no card carries this tag — the story would have nowhere to go">⚠</span>':''}
+    <input class="oscript" value="${esc((o.set||[]).join(' '))}" placeholder="set: coins+1"
+      title="flags to set when this is chosen — brave, !met_gertie, coins+1, coins=5"
+      onchange="setOption(${c.id},${i},'set',this.value)">
+    <input class="oscript" value="${esc(o.when||'')}" placeholder="when: coins>=3"
+      title="offer this option only when the condition holds — brave, !met_gertie, coins>=3"
+      onchange="setOption(${c.id},${i},'when',this.value)">
+    <button class="tiny" onclick="rmOption(${c.id},${i})" title="remove this option">×</button>
+  </div>`;
+}
+// Option edits patch the rows in place rather than rebuilding the card — the
+// wrapper div carries no listeners, so no drag binding is disturbed. After a
+// save the row is repainted from what the server kept, which is how an op
+// that failed the grammar visibly disappears instead of silently not working.
+function redrawOpts(id){
+  const c=DOC&&DOC.chunks.find(x=>x.id===id), el=$('op'+id);
+  if(c&&el)el.innerHTML=(c.options||[]).map((o,i)=>optRow(c,o,i)).join('');
+}
+async function saveOptions(id,opts){
+  await api('/api/chunk',{name:DOC.name,id,options:opts});
+  await syncCards();
+  redrawOpts(id);
+}
+async function setOption(id,i,key,v){
+  const c=DOC&&DOC.chunks.find(x=>x.id===id); if(!c)return;
+  const opts=JSON.parse(JSON.stringify(c.options||[]));
+  if(!opts[i])return;
+  if(key==='set')opts[i].set=String(v).split(/[,\s]+/).filter(Boolean);
+  else opts[i][key]=v;
+  await saveOptions(id,opts);
+  const kept=((DOC.chunks.find(x=>x.id===id)||{}).options||[])[i]||{};
+  if((key==='set'&&(kept.set||[]).join(' ')!==opts[i].set.join(' '))||
+     (key==='when'&&(kept.when||'')!==String(v).replace(/\s+/g,'')))
+    $('status').innerHTML='<span class="warn">part of that failed the grammar and was dropped</span>'+
+      ' — ops are <b>brave</b>, <b>!met_gertie</b>, <b>coins+1</b>, <b>coins=5</b>;'+
+      ' conditions add <b>coins&gt;=3</b>';
+}
+async function addOption(id){
+  const c=DOC&&DOC.chunks.find(x=>x.id===id); if(!c)return;
+  await saveOptions(id,[...(c.options||[]),{label:'',goto:'',set:[],when:''}]);
+}
+async function rmOption(id,i){
+  const c=DOC&&DOC.chunks.find(x=>x.id===id); if(!c)return;
+  const opts=JSON.parse(JSON.stringify(c.options||[])); opts.splice(i,1);
+  await saveOptions(id,opts);
+}
+async function setAuto(id,on){
+  await api('/api/chunk',{name:DOC.name,id,auto:on});
+  await syncCards();
+  const ah=$('ah'+id);
+  if(ah)ah.textContent=on?'first passing option is taken silently'
+                         :'the stage stops here and asks';
 }
 
 // Cards fit their text by default — no card should hide a line you are trying
