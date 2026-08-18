@@ -3012,6 +3012,79 @@ class H(BaseHTTPRequestHandler):
                     return self._send(200, {"ok": True, "moved": False})
                 snapshot(doc, "move card")
                 ch.insert(to, ch.pop(src))
+                # Groups are contiguous runs, and a drag must never leave one
+                # torn in two: a card dropped inside a run joins it, a member
+                # dragged away from its own run's edges leaves the group.
+                mv = ch[to]
+                prevg = ch[to - 1].get("group") if to > 0 else None
+                nextg = ch[to + 1].get("group") if to + 1 < len(ch) else None
+                if prevg and prevg == nextg:
+                    mv["group"] = prevg
+                elif mv.get("group") not in (prevg, nextg):
+                    mv.pop("group", None)
+                for i, c in enumerate(ch):
+                    c["id"] = i
+                save(doc)
+                return self._send(200, {"ok": True, "moved": True})
+
+            # ── groups ── a group is a contiguous run of cards sharing a name:
+            # a chapter, a scene, a beat. Presentation and one drag-handle —
+            # nothing downstream reads it: not the mix, not the walk, not the
+            # exports. The run stays contiguous by construction: grouping
+            # fills the span between the outermost picks, and a card dragged
+            # out of its run leaves the group (see /api/move).
+            if u.path == "/api/group":
+                doc = load(d["name"])
+                # names land in onclick attributes and menu labels, so the
+                # characters that could break out of either never get in
+                gname = re.sub(r"[\"'`\\<>&]", "", str(d.get("gname") or "")).strip()[:60]
+                if not gname:
+                    return self._send(400, {"error": "a group needs a name"})
+                ids = {int(i) for i in (d.get("ids") or [])}
+                idx = [k for k, c in enumerate(doc["chunks"]) if c["id"] in ids]
+                if not idx:
+                    return self._send(404, {"error": "pick some cards first — "
+                                            "shift-click their headers"})
+                a, b = min(idx), max(idx)
+                if any(c.get("group") == gname
+                       for c in doc["chunks"][:a] + doc["chunks"][b + 1:]):
+                    return self._send(400, {"error": f"“{gname}” is already a group "
+                                            f"here — pick another name"})
+                snapshot(doc, f"group “{gname}”")
+                for c in doc["chunks"][a:b + 1]:
+                    c["group"] = gname
+                save(doc)
+                return self._send(200, {"ok": True, "gname": gname, "cards": b - a + 1})
+
+            if u.path == "/api/ungroup":
+                doc = load(d["name"])
+                gname = d.get("gname")
+                snapshot(doc, f"ungroup “{gname}”")
+                n = 0
+                for c in doc["chunks"]:
+                    if c.get("group") == gname:
+                        c.pop("group", None)
+                        n += 1
+                save(doc)
+                return self._send(200, {"ok": True, "cards": n})
+
+            if u.path == "/api/move_group":
+                doc = load(d["name"])
+                gname = d.get("gname")
+                ch = doc["chunks"]
+                idx = [k for k, c in enumerate(ch) if c.get("group") == gname]
+                if not idx:
+                    return self._send(404, {"error": f"no group “{gname}”"})
+                a, b = min(idx), max(idx) + 1
+                to = max(0, min(int(d["to"]), len(ch)))
+                if a <= to <= b:
+                    return self._send(200, {"ok": True, "moved": False})
+                snapshot(doc, f"move group “{gname}”")
+                block = ch[a:b]
+                del ch[a:b]
+                if to > b:
+                    to -= len(block)
+                ch[to:to] = block
                 for i, c in enumerate(ch):
                     c["id"] = i
                 save(doc)

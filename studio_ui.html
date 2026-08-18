@@ -148,6 +148,12 @@ color:var(--dim);white-space:nowrap}
 .subrow input{flex:1;color:var(--bright)}
 /* a collapsed card: the header bar carries the whole identity */
 .chunk.min{background:#101413}
+/* a group's bar — fold, name, drag-handle for the whole run */
+.gbar{display:flex;gap:8px;align-items:center;padding:5px 10px;margin:2px 0 7px;
+border:1px solid var(--line);border-left:3px solid var(--amber);border-radius:6px;
+background:#14120d;cursor:grab;font-size:12px}
+.gbar b{color:var(--amber);font-weight:600}
+.gfold{display:none}
 .cardname{color:var(--bright);overflow:hidden;text-overflow:ellipsis;
 white-space:nowrap;max-width:42ch}
 button.tiny{padding:0 5px;font-size:12px;line-height:17px;border-color:transparent;color:var(--faint)}
@@ -1631,6 +1637,10 @@ function cardMenu(e,id){
   if(c.label)items.push({label:'clear the name', run:()=>setCard(id,{label:''},true)});
   items.push({label:c.locked?'unlock':'lock',
     run:()=>setCard(id,{locked:!c.locked},true)});
+  if(SEL.size>1)items.unshift(
+    {label:`group the ${SEL.size} selected…`, run:()=>{ openCtx(e,[]);
+       ctxAsk('','the yard, act one','group',v=>makeGroup(v)); }},'-');
+  if(c.group)items.push({label:`ungroup “${c.group}”`, run:()=>ungroup(c.group)});
   items.push('-',{label:'copy', run:()=>copyCard(id)});
   openCtx(e,items);
 }
@@ -1718,10 +1728,95 @@ async function duplicateProfile(n){
 // be born exactly where it belongs.
 function renderDoc(){
   tagCounts();                        // tagsUi reads TAGN for its dup warnings
-  $('main').innerHTML=insBar(0)+DOC.chunks.map(c=>cardHTML(c)+insBar(c.id+1)).join('');
+  // Groups render as a bar above their first member. A folded group's cards
+  // stay in the DOM at display:none — bindDrag counts strips by index, and a
+  // missing strip would shift every drop slot after it.
+  let prevG=null;
+  $('main').innerHTML=insBar(0)+DOC.chunks.map(c=>{
+    let h='';
+    const g=c.group||null;
+    if(g&&g!==prevG)h+=gbar(g);
+    prevG=g;
+    if(g&&isGmin(g))h+=`<div class="gfold">${cardHTML(c)}</div><div class="ins gfold"></div>`;
+    else h+=cardHTML(c)+insBar(c.id+1);
+    return h;
+  }).join('');
   DOC.chunks.forEach(c=>{ if(c.type==='audio')fadeUi(c.id); });
   bindDrag(); paintClip();          // the strips are new, so their paste buttons are too
 }
+// ── groups ────────────────────────────────────────────────
+// A contiguous run of cards under one name — a scene, a beat — with a bar
+// that folds them away and drags them as one. Presentation only: nothing
+// downstream reads it. Fold state is this machine's business, not the
+// document's, so it lives beside the other view state in localStorage.
+let GMIN={};
+try{ GMIN=JSON.parse(localStorage.getItem('saga.gmin')||'{}'); }catch(e){}
+const gkey=g=>(DOC?DOC.name:'')+'/'+g;
+const isGmin=g=>!!GMIN[gkey(g)];
+function toggleGmin(g){
+  if(GMIN[gkey(g)])delete GMIN[gkey(g)]; else GMIN[gkey(g)]=1;
+  try{ localStorage.setItem('saga.gmin',JSON.stringify(GMIN)); }catch(e){}
+  open_(DOC.name,true);
+}
+function gbar(g){
+  // the name was stripped of quote/angle characters on the way in, so it can
+  // sit inside these handlers without breaking out of them
+  const n=DOC.chunks.filter(x=>x.group===g).length, min=isGmin(g);
+  return `<div class="gbar" draggable="true" title="drag to move the whole group"
+    ondragstart="groupDragStart(event,'${esc(g)}')" ondragend="groupDragEnd()">
+    <button class="tiny" onclick="toggleGmin('${esc(g)}')" title="${min?'unfold':'fold away'} these cards">${min?'▸':'▾'}</button>
+    <b ondblclick="toggleGmin('${esc(g)}')">${esc(g)}</b>
+    <span class="mut" style="font-size:11px">${n} card${n===1?'':'s'}${min?' · folded':''}</span>
+    <span style="flex:1"></span>
+    <button class="tiny" onclick="ungroup('${esc(g)}')" title="ungroup — the cards stay where they are">×</button>
+  </div>`;
+}
+async function makeGroup(v){
+  const r=await api('/api/group',{name:DOC.name,ids:[...SEL],gname:v});
+  if(r.error)return void($('status').innerHTML=`<span class="warn">${esc(r.error)}</span>`);
+  SEL.clear(); $('chatnote').textContent='';
+  await open_(DOC.name,true);
+  $('status').innerHTML=`<span class="ok">grouped ${r.cards} card${r.cards===1?'':'s'} as “${esc(r.gname)}”</span>`+
+    ' — drag the bar to move them together, fold them with ▾';
+}
+async function ungroup(g){
+  const r=await api('/api/ungroup',{name:DOC.name,gname:g});
+  if(r.error)return void($('status').innerHTML=`<span class="warn">${esc(r.error)}</span>`);
+  delete GMIN[gkey(g)];
+  await open_(DOC.name,true);
+  $('status').innerHTML=`<span class="ok">ungrouped “${esc(g)}”</span> — the cards stay where they are`;
+}
+let DRAGGROUP=null;
+function groupDragStart(e,g){
+  DRAGGROUP=g;
+  document.body.dataset.dropclip='1';     // light the gaps, as an arriving clip does
+  e.dataTransfer.effectAllowed='move';
+  try{ e.dataTransfer.setData('text/plain',g); }catch(_){}
+}
+function groupDragEnd(){ DRAGGROUP=null; document.body.dataset.dropclip=''; clearMarks(); }
+async function dropGroupAt(at){
+  const g=DRAGGROUP; DRAGGROUP=null; clearMarks();
+  document.body.dataset.dropclip='';
+  if(!g||!DOC)return;
+  await flushAll();
+  const r=await api('/api/move_group',{name:DOC.name,gname:g,to:at});
+  if(r.error)return void($('status').innerHTML=`<span class="warn">${esc(r.error)}</span>`);
+  HEIGHT={}; CUR=null;
+  await open_(DOC.name,true);
+}
+// Shift-click gathers cards for grouping — the same SEL the discuss panel
+// reads, so a selection is a selection wherever it is spent.
+$('main').addEventListener('mousedown',e=>{
+  if(!e.shiftKey)return;
+  const card=e.target.closest('.chunk'); if(!card)return;
+  e.preventDefault();                     // no text selection on a shift-click
+  const id=+card.id.slice(1);
+  pick(id,!SEL.has(id));
+  card.classList.toggle('sel',SEL.has(id));
+  $('status').textContent=SEL.size>1
+    ?SEL.size+' cards selected — right-click a card header to group them'
+    :SEL.size?'1 card selected — shift-click more, then right-click a header':'';
+});
 function cardHTML(c){
   if(c.min)return minCard(c);
   return c.type==='audio'?audioCard(c)
@@ -2966,7 +3061,7 @@ function clearMarks(){ document.querySelectorAll('.dropa,.dropb,.ins.hot')
 // Two things can be dropped on the stack: a card being moved within it, and a
 // clip arriving from the sidebar. Same targets, same marks — only the landing
 // differs, so each handler asks which is in flight rather than which gate it is.
-const dragging=()=>DRAGID!=null||DRAGCLIP!=null||DRAGMEDIA!=null;
+const dragging=()=>DRAGID!=null||DRAGCLIP!=null||DRAGMEDIA!=null||DRAGGROUP!=null;
 function bindDrag(){
   document.querySelectorAll('#main .chunk').forEach(el=>{
     el.addEventListener('dragover',e=>{
@@ -2981,6 +3076,7 @@ function bindDrag(){
       const at=(+el.id.slice(1))+(before?0:1);
       if(DRAGCLIP)return dropClipAt(at);
       if(DRAGMEDIA)return dropMediaAt(at);
+      if(DRAGGROUP)return dropGroupAt(at);
       moveCard(DRAGID,at);
     });
   });
@@ -2996,6 +3092,7 @@ function bindDrag(){
       if(!dragging())return; e.preventDefault();
       if(DRAGCLIP)return dropClipAt(at);
       if(DRAGMEDIA)return dropMediaAt(at);
+      if(DRAGGROUP)return dropGroupAt(at);
       moveCard(DRAGID,at);
     });
   });
