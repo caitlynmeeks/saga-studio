@@ -103,6 +103,16 @@ Only the first **6 seconds** shape cadence and the first **10** shape timbre
   documents and closing the tab. A pasted card usually needs no rendering:
   audio is filed by a hash of the words and the voice, so the copy finds the
   wav the original already had.
+- **The sidebar is three tabs** — stories, voices, clips — each with the whole
+  column and its own scrollbar, sorted by name or by date. Stories sort by *last
+  edited* rather than date added, because a batch import stamps twenty episodes
+  with the same minute and only the edit date tells them apart.
+- **The clips library** lists every music and effect clip with its length and how
+  many cards use it. Play one to hear it, right-click to rename (which updates
+  every card pointing at it), or **drag it into the episode** to drop an audio
+  card wherever you let go. There is no delete: clips are global, undo can
+  resurrect a card that names one, and an export packs whatever the cards name —
+  so remove the card, not the file.
 - **Voice profiles** are reusable objects: a set of voice clips plus delivery
   parameters, with a note about when to use it. Make a flat one for a character
   reading a machine log and a warm one for the same character in conversation,
@@ -114,6 +124,12 @@ Only the first **6 seconds** shape cadence and the first **10** shape timbre
   would need re-baking · 4,945 cards use this profile, across 21 projects.”*
   **Save as new…** keeps the old profile intact and puts your changes in a new
   one instead.
+
+  A profile also has a **level**, and one card can override it in the delivery
+  row. It is applied when the timeline is mixed rather than when a card is
+  rendered — so it is in no hash, evening out a character who reads louder than
+  the rest costs nothing, and the impact line says so: *0 cards would need
+  re-baking*.
 
   Nothing about this is destructive. Renders are content-addressed and never
   deleted, so the old audio stays on disk under its old name — **put it back**
