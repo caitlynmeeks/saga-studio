@@ -35,7 +35,8 @@ background:none;color:var(--dim);padding:3px 9px 5px;font-size:11.5px}
 aside .pane{overflow-y:auto;padding:12px;min-height:0;display:none}
 body[data-side=stories] #sideStories,
 body[data-side=voices] #sideVoices,
-body[data-side=clips] #sideClips{display:block}
+body[data-side=clips] #sideClips,
+body[data-side=publish] #sidePublish{display:block}
 /* The right column is an inspector: what it shows belongs to whatever is
    selected, and it is wider than the sidebar, which the profile editor had
    outgrown. Discuss shares it as a second tab rather than a second column —
@@ -300,6 +301,7 @@ body:not([data-tab=chat]) .dchk,body[data-panel=off] .dchk{display:none}
    <button id="sbStories" onclick="setSide('stories')">stories</button>
    <button id="sbVoices" onclick="setSide('voices')">voices</button>
    <button id="sbClips" onclick="setSide('clips')">media</button>
+   <button id="sbPublish" onclick="setSide('publish')">publish</button>
  </div>
  <div class="pane" id="sideStories">
   <h2>documents</h2>
@@ -358,6 +360,11 @@ body:not([data-tab=chat]) .dchk,body[data-panel=off] .dchk{display:none}
   </div>
   <input type="file" id="mediafile" hidden
     accept="image/*,video/*,.png,.jpg,.jpeg,.webp,.gif,.mp4,.webm,.mov">
+ </div>
+
+ <div class="pane" id="sidePublish">
+  <h2>publish</h2>
+  <div id="pubwrap"></div>
  </div>
 </aside>
 
@@ -574,6 +581,7 @@ async function refresh(){
   $('model').textContent='model: '+STATE.model;
   renderProfileList();       // counts move as cards do; the editor is left alone
   if(document.body.dataset.side==='clips'){ renderClips(); renderMedia(); }
+  if(document.body.dataset.side==='publish')renderPublish();
   paintStale();
   // once per session, and only if the second engine is here to need it
   if(STATE.omnivoice&&!LANGS)
@@ -661,6 +669,7 @@ async function open_(name,quiet,anchor){
   keepPlace(an,was);          // after fitAll: the heights must be final first
   syncBookBtn();
   if(!quiet)refresh();
+  if(document.body.dataset.side==='publish')renderPublish();
   const rd=DOC.chunks.filter(c=>c.ready).length;
   $('dl').hidden=rd<DOC.chunks.length; $('dl').href='/api/download?name='+encodeURIComponent(name);
 }
@@ -1160,7 +1169,7 @@ function paintStale(){
 }
 
 // ── the sidebar's three tabs ──────────────────────────────
-const SIDES=['stories','voices','clips'];
+const SIDES=['stories','voices','clips','publish'];
 function setSide(t){
   if(!SIDES.includes(t))t='stories';
   document.body.dataset.side=t;
@@ -1171,6 +1180,7 @@ function setSide(t){
   // Guarded on STATE: this runs once at parse time to restore the last tab,
   // and renderClips leans on helpers declared further down the file.
   if(t==='clips'&&STATE.clips){ renderClips(); renderMedia(); }
+  if(t==='publish'&&STATE.projects)renderPublish();
   try{ localStorage.setItem('saga.side',t); }catch(e){}
 }
 try{ setSide(localStorage.getItem('saga.side')||'stories'); }catch(e){ setSide('stories'); }
@@ -1477,6 +1487,69 @@ $('mediafile').onchange=async e=>{
   await refresh(); renderMedia();
   if(id!=null&&DOC)open_(DOC.name,true,id);
 };
+
+// ── publish ───────────────────────────────────────────────
+// Three doors out of the studio, all working on the open episode. The
+// audiobook is assemble as it has always been; the animatic is the same audio
+// under the visual cards' stills; the web story is a folder of HTML that
+// plays offline, choices and all.
+function renderPublish(){
+  const host=$('pubwrap'); if(!host)return;
+  if(!DOC){ host.innerHTML='<span class="mut" style="font-size:12px">open an '+
+    'episode first — publishing works on the one that is open</span>'; return; }
+  const nch=DOC.chunks.filter(c=>c.type==='choice').length;
+  const nvis=DOC.chunks.filter(c=>c.type==='visual').length;
+  const miss=unrendered().length;
+  host.innerHTML=`
+    <div class="mut" style="font-size:12px;margin-bottom:10px">“${esc(DOC.title)}”${
+      miss?` — <span class="warn">${miss} card${miss===1?'':'s'} not rendered</span>`
+          :' — all rendered'}</div>
+    <h2>audiobook</h2>
+    <div class="mut" style="font-size:11px">Cards top to bottom, choices walked
+      straight past. The mp3 lands in out/.</div>
+    <button onclick="assemble()" style="margin-top:6px">assemble mp3</button>
+    <h2 style="margin-top:16px">animatic video</h2>
+    <div class="mut" style="font-size:11px">${nvis
+      ?nvis+' visual'+(nvis===1?'':'s')+' as stills under the audiobook’s audio; film contributes its first frame.'
+      :'No visual cards yet — the film would be a black screen with a soundtrack.'}</div>
+    <div style="display:flex;gap:5px;margin-top:6px;align-items:center">
+      <select id="pubheight"><option value="720">720p</option>
+        <option value="1080" selected>1080p</option></select>
+      <button id="pubvid" onclick="publishVideo()">export video</button>
+    </div>
+    <h2 style="margin-top:16px">web story</h2>
+    <div class="mut" style="font-size:11px">A folder of HTML that plays offline —
+      visuals, captions${nch?', and its '+nch+' choice'+(nch===1?'':'s'):''}.
+      Unzip anywhere, open index.html.</div>
+    <button id="pubweb" onclick="publishWeb()" style="margin-top:6px">export web story</button>
+    <div id="pubmsg" class="mut" style="font-size:11px;margin-top:8px"></div>`;
+}
+async function publishVideo(){
+  if(!DOC)return;
+  const b=$('pubvid'); b.classList.add('busy'); b.disabled=true;
+  $('pubmsg').textContent='mixing and encoding — a long episode takes a minute…';
+  const r=await api('/api/publish_video',{name:DOC.name,height:+$('pubheight').value});
+  b.classList.remove('busy'); b.disabled=false;
+  if(r.error)return void($('pubmsg').innerHTML=`<span class="warn">${esc(r.error)}</span>`);
+  $('pubmsg').innerHTML=`<span class="ok">done</span> — ${r.frames} still${
+    r.frames===1?'':'s'}, ${size(r.bytes)}${r.missing
+      ?`, <span class="warn">${r.missing} unrendered card${r.missing===1?'':'s'} skipped</span>`:''}
+    · <a href="/api/download_video?name=${encodeURIComponent(DOC.name)}">download</a>
+    · <a href="#" onclick="revealOut();return false">show in Finder</a>`;
+}
+async function publishWeb(){
+  if(!DOC)return;
+  const b=$('pubweb'); b.classList.add('busy'); b.disabled=true;
+  $('pubmsg').textContent='mixing every stretch and packing the folder…';
+  const r=await api('/api/publish_html',{name:DOC.name});
+  b.classList.remove('busy'); b.disabled=false;
+  if(r.error)return void($('pubmsg').innerHTML=`<span class="warn">${esc(r.error)}</span>`);
+  $('pubmsg').innerHTML=`<span class="ok">done</span> — ${r.segments} stretch${
+    r.segments===1?'':'es'} of audio, ${size(r.bytes)} zipped${r.missing
+      ?`, <span class="warn">${r.missing} unrendered card${r.missing===1?'':'s'} skipped</span>`:''}
+    · <a href="/api/download_web?name=${encodeURIComponent(DOC.name)}">download</a>
+    · <a href="#" onclick="revealOut();return false">show in Finder</a>`;
+}
 
 // ── right-click menus ─────────────────────────────────────
 // One element, built where the pointer is and thrown away after. Items carry
