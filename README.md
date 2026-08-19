@@ -218,7 +218,10 @@ Only the first **6 seconds** shape cadence and the first **10** shape timbre
   content-addressed and global, a draft is born fully rendered and applying
   one re-renders nothing. Replies stream in as they are written, tool calls
   and all, and the deck reloads as the cards land; the conversation resumes
-  across asks. Entirely optional.
+  across asks. Entirely optional — and when Claude Code is missing or not
+  signed in, the panel says what it needs and how to get it (a Claude plan
+  or an API key both work) instead of erroring; the rest of the studio never
+  depends on it. `SAGA_CLAUDE` points at an unusually-installed binary.
 
 ## Stories that branch
 
