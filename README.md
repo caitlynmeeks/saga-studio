@@ -205,8 +205,20 @@ Only the first **6 seconds** shape cadence and the first **10** shape timbre
 - **Back up** with *export everything* — one `.sagaproj` file holding every
   document, the voice clips and profiles they need, and the rendered audio.
   Restore by dropping it back on the left. See below.
-- **Discuss** shells out to the Claude Code CLI with selected cards as context,
-  if you have it installed. Entirely optional.
+- **Discuss** is a conversation with Claude that can work the studio. It runs
+  the Claude Code CLI, if you have it installed, with exactly one set of
+  tools: the studio's own — read any story, cast new characters with new
+  profiles, write and edit cards, render a line to check a voice. Every edit
+  lands in a **draft**: a working copy of the story (or a brand-new story
+  flagged as one) that appears in the sidebar like any other project. The
+  story itself is untouched until you press **apply** on the bar over the
+  draft — one ⌘Z there undoes even that — or **discard**. The draft rule is
+  enforced in code, not in the prompt, and there is no tool for deleting
+  anything or for changing an existing profile. Because renders are
+  content-addressed and global, a draft is born fully rendered and applying
+  one re-renders nothing. Replies stream in as they are written, tool calls
+  and all, and the deck reloads as the cards land; the conversation resumes
+  across asks. Entirely optional.
 
 ## Stories that branch
 
