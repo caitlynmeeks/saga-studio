@@ -3511,6 +3511,37 @@ class H(BaseHTTPRequestHandler):
 
             if u.path == "/api/remove":
                 doc = load(d["name"])
+                if d.get("scope") in ("above", "below"):
+                    # Trimming an import: everything on one side of this card
+                    # goes, in one undo step. Locked cards stay — the lock
+                    # means "finished", and a sweep is exactly the careless
+                    # hand it exists to guard against. A swept group bar whose
+                    # members survive grows back on save, which is right: the
+                    # survivors keep their scene.
+                    scope = d["scope"]
+                    pos = next((i for i, c in enumerate(doc["chunks"])
+                                if c["id"] == d["id"]), None)
+                    if pos is None:
+                        return self._send(404, {"error": "no such card"})
+                    snapshot(doc, f"remove all {scope}")
+                    keep, removed, kept = [], 0, 0
+                    for i, c in enumerate(doc["chunks"]):
+                        inside = i < pos if scope == "above" else i > pos
+                        if inside and not c.get("locked"):
+                            removed += 1
+                            continue
+                        if inside:
+                            kept += 1
+                        keep.append(c)
+                    doc["chunks"] = keep
+                    for i, c in enumerate(doc["chunks"]):
+                        c["id"] = i
+                    save(doc)
+                    # after renumbering, the card's id is its index: unmoved
+                    # for a below-sweep, shifted up by what left for an above
+                    new_id = pos if scope == "below" else pos - removed
+                    return self._send(200, {"ok": True, "removed": removed,
+                                            "kept": kept, "id": new_id})
                 gone = next((c for c in doc["chunks"] if c["id"] == d["id"]), None)
                 if gone is not None and gone.get("locked"):
                     return self._send(400, {"error": "that card is locked — "

@@ -1765,7 +1765,28 @@ function cardMenu(e,id){
     {label:`Group the ${SEL.size} Selected`, run:()=>makeGroup(freeGroupName())},'-');
   if(c.group)items.push({label:'Ungroup', run:()=>popFromGroup(id)});
   items.push('-',{label:'Copy', run:()=>copyCard(id)});
+  // Trimming an import: a script arrives with front-matter and notes around
+  // the part being worked on, and picking them off one by one is a chore.
+  const at=DOC.chunks.findIndex(x=>x.id===id);
+  const above=at, below=DOC.chunks.length-1-at;
+  if(above||below)items.push('-');
+  if(above)items.push({label:`Delete the ${above} Card${above===1?'':'s'} Above…`,
+    danger:true, run:()=>removeSweep(id,'above')});
+  if(below)items.push({label:`Delete the ${below} Card${below===1?'':'s'} Below…`,
+    danger:true, run:()=>removeSweep(id,'below')});
   openCtx(e,items);
+}
+async function removeSweep(id,scope){
+  const n=scope==='above'?DOC.chunks.findIndex(x=>x.id===id)
+                         :DOC.chunks.length-1-DOC.chunks.findIndex(x=>x.id===id);
+  if(!confirm(`Remove every card ${scope} this one — ${n} card${n===1?'':'s'}?\n\n`+
+              `Locked cards stay. ⌘Z brings the rest back.`))return;
+  await flushAll();
+  const r=await api('/api/remove',{name:DOC.name,id,scope});
+  if(r.error)return void($('status').innerHTML=`<span class="warn">${esc(r.error)}</span>`);
+  await open_(DOC.name,true,r.id);
+  $('status').innerHTML=`<span class="ok">removed ${r.removed} card${r.removed===1?'':'s'}</span>`+
+    (r.kept?` — ${r.kept} locked card${r.kept===1?'':'s'} stayed`:'')+' — ⌘Z brings them back';
 }
 
 function projMenu(e,name){
