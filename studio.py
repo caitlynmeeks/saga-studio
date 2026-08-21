@@ -109,6 +109,10 @@ SETTINGS_DEFAULTS = {
     "llm": {"provider": "claude", "model": "", "key": "", "url": ""},
     "image": {"provider": "nanobanana", "key": "", "url": ""},
     "apps": {"image": "", "audio": "", "video": ""},
+    # the darkride account key: uploads wearing it land in that account
+    # ("My studio" on darkride.ai hands one out). Blank = share anonymously,
+    # exactly as before accounts existed.
+    "darkride": {"key": ""},
 }
 LLM_PROVIDERS = ("claude", "anthropic", "lmstudio", "llamacpp", "openai",
                  "custom")
@@ -3370,10 +3374,13 @@ def share_web(name, unlisted=None):
     if unlisted is None:
         unlisted = bool(share.get("unlisted"))
     payload = zp.read_bytes()
+    dk = settings()["darkride"]["key"]
     for retry in (False, True):
         req = urllib.request.Request(DARKRIDE + "/api/upload", data=payload,
                                      headers={"Content-Type": "application/zip"})
         req.add_header("X-Darkride-Unlisted", "1" if unlisted else "0")
+        if dk:                       # the account this share belongs to
+            req.add_header("X-Darkride-Key", dk)
         if share.get("slug") and share.get("token"):
             req.add_header("X-Darkride-Slug", share["slug"])
             req.add_header("X-Darkride-Token", share["token"])
@@ -3444,6 +3451,7 @@ def share_source(name):
                                f"{SOURCE_CAP // (1 << 30)} GB source cap — "
                                "trim the media pool or the takes")
         fn = f"{name}-{time.strftime('%Y-%m-%d')}.sagaproj"
+        dk = settings()["darkride"]["key"]
         for retry in (False, True):
             # streamed, not read_bytes(): urllib sends a file object in
             # blocks as long as Content-Length is given by hand
@@ -3454,6 +3462,8 @@ def share_source(name):
                          "Content-Length": str(size),
                          "X-Darkride-Filename": fn,
                          "X-Darkride-Title": title})
+            if dk:                   # the account this upload belongs to
+                req.add_header("X-Darkride-Key", dk)
             if src.get("slug") and src.get("token"):
                 req.add_header("X-Darkride-Slug", src["slug"])
                 req.add_header("X-Darkride-Token", src["token"])
