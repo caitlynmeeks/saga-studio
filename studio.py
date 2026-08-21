@@ -903,9 +903,38 @@ def generate_media(prompt, stem="", aspect="", ref=""):
         dest = MEDIA / f"{name}{ext}"
         os.replace(tmp, dest)              # same filesystem: tmp lives in ROOT
         os.chmod(dest, 0o644)              # mkstemp makes it 0600
+        w = webp_still(dest)               # painted stills arrive pressed
+        if w:
+            os.chmod(w, 0o644)
+            dest.unlink()
     finally:
         Path(tmp).unlink(missing_ok=True)
     return name
+
+
+def webp_still(src):
+    """Press one still image into WebP beside src; the .webp path comes back
+    when it is genuinely smaller, else None and src stands untouched.
+
+    ffmpeg does the pressing (quality 82 — visually clean at a fraction of a
+    PNG's weight, alpha kept). GIFs are left alone: they may animate, and
+    this would keep only their first frame. No ffmpeg, no pressing — the
+    pool still works, it is just heavier."""
+    src = Path(src)
+    if src.suffix.lower() not in (".png", ".jpg", ".jpeg"):
+        return None
+    if not shutil.which("ffmpeg"):
+        return None
+    tmp = src.with_name("." + src.stem + ".press.webp")
+    r = subprocess.run(["ffmpeg", "-y", "-i", str(src), "-c:v", "libwebp",
+                        "-quality", "82", str(tmp)], capture_output=True)
+    if r.returncode or not tmp.exists() or not tmp.stat().st_size \
+            or tmp.stat().st_size >= src.stat().st_size:
+        tmp.unlink(missing_ok=True)
+        return None
+    out = src.with_suffix(".webp")
+    os.replace(tmp, out)
+    return out
 
 
 def _ref_image(ref):
@@ -4383,12 +4412,12 @@ class H(BaseHTTPRequestHandler):
     def _media_upload(self, u):
         """A picture or a piece of film for visual cards.
 
-        Raw body like every other upload, but no ffmpeg and no transcode: the
-        browser shows these formats natively, and unlike audio there is no
-        mixdown needing everything at one rate — what arrives is what is kept,
-        checked only against the short list of extensions the stage and the
-        exports know how to show. Never overwrites, same rule as clips: media
-        is global, and replacing a name would change every episode showing it."""
+        Raw body like every other upload. Film passes through untouched, but
+        a still is pressed to WebP on arrival (webp_still — quality 82, only
+        kept when smaller): the stage shows it identically, and every export,
+        source archive and darkride upload gets lighter for free. Never
+        overwrites, same rule as clips: media is global, and replacing a
+        name would change every episode showing it."""
         fn = parse_qs(u.query).get("fn", ["media"])[0]
         ext = Path(fn).suffix.lower()
         if ext not in IMG_EXT + VID_EXT:
@@ -4399,6 +4428,12 @@ class H(BaseHTTPRequestHandler):
         try:
             with os.fdopen(fd, "wb") as f:
                 self._read_body_to(f)
+            # stills arrive pressed to WebP — BEFORE the dedupe below, so
+            # importing the same picture twice still hashes to one file
+            w = webp_still(Path(tmp))
+            if w:
+                Path(tmp).unlink(missing_ok=True)
+                tmp, ext = str(w), ".webp"
             MEDIA.mkdir(parents=True, exist_ok=True)
             name = stem
             try:
@@ -4505,6 +4540,25 @@ class H(BaseHTTPRequestHandler):
                 return self._send(400, {"error": f"{type(ex).__name__}: {ex}"})
             finally:
                 Path(tmp).unlink(missing_ok=True)
+        # Press every still already in the pool to WebP: names keep, bytes
+        # drop, and the next export or upload is lighter for it. Files only
+        # ever REPLACED by a smaller same-picture, so pool law holds in
+        # spirit: no name changes meaning.
+        if u.path == "/api/media/compress":
+            pressed, saved = 0, 0
+            for p in sorted(MEDIA.iterdir()) if MEDIA.exists() else []:
+                if not p.is_file() \
+                        or p.suffix.lower() not in (".png", ".jpg", ".jpeg"):
+                    continue
+                was = p.stat().st_size
+                w = webp_still(p)
+                if w:
+                    os.chmod(w, 0o644)
+                    p.unlink()
+                    pressed += 1
+                    saved += was - w.stat().st_size
+            return self._send(200, {"ok": True, "pressed": pressed,
+                                    "saved": saved})
         # Editor settings: one small file of its own, no doc and no lock.
         if u.path == "/api/settings":
             return self._send(200, save_settings(d))

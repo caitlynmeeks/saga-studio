@@ -491,6 +491,8 @@ color:var(--faint);margin:0 0 9px;font-weight:600}
   <div id="media"></div>
   <div style="display:flex;gap:5px;margin-top:8px">
     <button onclick="importMedia()">Import an Image or Film…</button>
+    <button onclick="pressPool()" id="pressb"
+      title="recompress every png/jpg still in the pool to WebP — same pictures, a fraction of the weight; exports, source archives and uploads all slim down. New imports and paintings are pressed automatically.">Slim to WebP</button>
   </div>
   <input type="file" id="mediafile" hidden
     accept="image/*,video/*,.png,.jpg,.jpeg,.webp,.gif,.mp4,.webm,.mov">
@@ -1989,6 +1991,19 @@ async function dropMediaAt(at,grp){
     ` — the stage shows it from here until the next visual`;
 }
 let MEDIATARGET=null;
+// one pass over the pool: every png/jpg still becomes a lighter WebP with
+// the same name, so nothing pointing at it notices anything but the weight
+async function pressPool(){
+  const b=$('pressb'); if(b){ b.disabled=true; b.textContent='pressing…'; }
+  let r; try{ r=await api('/api/media/compress',{}); }
+  catch(ex){ r={error:String(ex)}; }
+  if(b){ b.disabled=false; b.textContent='Slim to WebP'; }
+  if(r.error)return void($('status').innerHTML=`<span class="warn">${esc(r.error)}</span>`);
+  $('status').textContent=r.pressed
+    ? `pressed ${r.pressed} still${r.pressed===1?'':'s'} to WebP — saved ${size(r.saved)}`
+    : 'nothing to press — the stills are already WebP (or film)';
+  refresh();
+}
 function pickMedia(id){ MEDIATARGET=id; $('mediafile').click(); }
 function importMedia(){ MEDIATARGET=null; $('mediafile').click(); }
 $('mediafile').onchange=async e=>{
