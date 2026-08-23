@@ -50,7 +50,7 @@ body[data-side=settings] #sideSettings{display:block}
 .stlab .approw input{margin-top:0;flex:1;min-width:0}
 /* The right column is an inspector: what it shows belongs to whatever is
    selected, and it is wider than the sidebar, which the profile editor had
-   outgrown. Discuss shares it as a second tab rather than a second column —
+   outgrown. The Drama Manager shares it as a second tab, not a second column,
    three panels of chrome around one column of cards is more frame than
    picture. */
 #right{border-left:1px solid var(--line);display:grid;
@@ -237,7 +237,7 @@ input[type=number]{width:62px}
   border-radius:5px;padding:2px 7px;margin:5px 0;white-space:normal;
   overflow-wrap:anywhere}
 #log .tchip.warn{color:var(--amber);border-color:#5c4a26}
-/* first-run cards: what Discuss needs and how to get it, in place of an
+/* first-run cards: what Brenda needs and how to get it, in place of an
    error nobody asked for */
 #log .setup{border:1px solid var(--line);border-radius:7px;padding:9px 11px;
   margin:6px 0;color:var(--fg);white-space:normal;line-height:1.55}
@@ -245,8 +245,8 @@ input[type=number]{width:62px}
 #log .setup a{color:var(--amber);cursor:pointer}
 #log .setup .cpy{cursor:pointer;color:var(--dim);border:1px solid var(--line);
   border-radius:4px;padding:0 5px;font-size:10.5px;margin-left:5px}
-/* a draft is Claude's sandbox: this bar is where the author disposes of what
-   the agent proposed */
+/* a draft is Brenda's sandbox: this bar is where the author disposes of what
+   she proposed */
 #draftbar{display:flex;gap:8px;align-items:center;padding:7px 12px;
   font-size:12.5px;color:var(--amber);background:#161206;
   border-bottom:1px solid #5c4a26}
@@ -444,12 +444,12 @@ color:var(--fg);font-size:11px}
 .prev,.mvrow{display:flex;gap:6px;align-items:center;font-size:11px;flex-wrap:wrap}
 .prev .mut{flex:1}
 .mvrow select{max-width:110px}
-/* The discuss panel is off by default and the third column simply stops
+/* The Drama Manager panel is off by default and the third column simply stops
    existing — collapsing it rather than hiding it is what gives the width back
    to the cards, which is the column you actually read. */
 body[data-panel=off]{grid-template-columns:var(--sidew,270px) 1fr}
 body[data-panel=off] #right{display:none}
-/* "send this as context" only means something while discuss is the visible tab */
+/* "send this as context" only means something while Brenda is the visible tab */
 body:not([data-tab=chat]) .dchk,body[data-panel=off] .dchk{display:none}
 #chatb.on,#frb.on,#dockb.on,#followb.on{border-color:var(--green);color:var(--green)}
 /* take stepper: which roll of the dice this card is speaking */
@@ -623,9 +623,9 @@ color:var(--faint);margin:0 0 9px;font-weight:600}
     machine. Keys are kept outside the library, so an exported story pack
     never carries one.</div>
 
-  <h2>Discuss</h2>
-  <div class="mut" style="font-size:11px;margin-bottom:2px">The model behind
-    the Discuss panel.</div>
+  <h2>Drama Manager</h2>
+  <div class="mut" style="font-size:11px;margin-bottom:2px">The model Brenda
+    thinks with. She is herself whichever one you pick.</div>
   <label class="stlab">Provider
     <select id="st_llm_p" onchange="settingsVis();saveSettings()">
       <option value="claude">Claude (Claude Code sign-in)</option>
@@ -647,7 +647,7 @@ color:var(--faint);margin:0 0 9px;font-weight:600}
 
   <h2 style="margin-top:18px">Illustration</h2>
   <div class="mut" style="font-size:11px;margin-bottom:2px">Who paints when a
-    visual card asks to be painted, here and in Discuss.</div>
+    visual card asks to be painted, here and when Brenda paints.</div>
   <label class="stlab">Provider
     <select id="st_img_p" onchange="settingsVis();saveSettings()">
       <option value="nanobanana">Nanobanana (Gemini)</option>
@@ -721,7 +721,7 @@ color:var(--faint);margin:0 0 9px;font-weight:600}
 <div id="right">
  <div id="rtabs">
    <button id="tabInspect" onclick="setTab('inspect')">Inspector</button>
-   <button id="tabChat" onclick="setTab('chat')">Discuss</button>
+   <button id="tabChat" onclick="setTab('chat')">Drama Manager</button>
    <span style="flex:1"></span>
    <button class="tiny" onclick="setPanel(false)" title="hide this panel">×</button>
  </div>
@@ -733,8 +733,8 @@ color:var(--faint);margin:0 0 9px;font-weight:600}
    </div>
  </div>
  <div id="chat" class="rpane">
-  <h2>Discuss</h2>
-  <div id="log"><div class="m mut" id="chatintro">Ask about pacing or a passage — or hand over real work: a new scene, a casting, a whole story. Claude works in a draft; you apply it or discard it.
+  <h2>Brenda</h2>
+  <div id="log"><div class="m mut" id="chatintro">Ask Brenda about pacing or a passage, or hand her real work: a new scene, a casting, a whole story. She works in a draft; you apply it or discard it.
 Selected cards go along as context.</div></div>
   <textarea id="ask" placeholder="e.g. tighten the foghorn scene, keep my phrasing"></textarea>
   <div style="display:flex;gap:6px;margin-top:6px">
@@ -779,11 +779,11 @@ const $=i=>document.getElementById(i);
 let DOC=null, SEL=new Set(), STATE={}, JOBS={}, POLL=null, HEIGHT={};
 let BAKETIMER=null, WASBAKING=false;
 // CUR is the card you are working in — the one edit-then-listen starts from.
-// SEL is a different idea entirely (which cards go to the discuss panel as
+// SEL is a different idea entirely (which cards go to Brenda as
 // context), so it gets a different colour and its own control.
 let CUR=null;
 
-// ── the discuss panel ─────────────────────────────────────
+// ── the drama manager panel ───────────────────────────────
 // Off by default: it is the panel you want twice an afternoon, and the rest of
 // the afternoon it is 340px that the cards could be using.
 // The right column is one panel with two tabs. Both bits of state are worth
@@ -832,8 +832,8 @@ function setCur(id){ if(CUR===id)return; CUR=id; paintCur(); followVoice(id);
 // with. ⌥-clicking the dropdown got you there before, which meant knowing the
 // gesture existed at all.
 //
-// It asks for nothing and opens nothing. A closed panel stays closed, Discuss
-// stays on Discuss, and an unsaved profile edit is left exactly where it is —
+// It asks for nothing and opens nothing. A closed panel stays closed, the
+// Drama Manager stays on its tab, an unsaved profile edit is left where it is,
 // clicking a card is not the moment to be stopped by a dialog you did not open.
 function followVoice(id){
   if(document.body.dataset.panel!=='on'||document.body.dataset.tab!=='inspect')return;
@@ -1851,7 +1851,7 @@ if(!/mac/i.test(navigator.platform||''))
   document.querySelectorAll('.appbrowse').forEach(b=>b.remove());
 
 // ── editor settings ───────────────────────────────────────
-// One small file on this machine, never in the library: which model Discuss
+// One small file on this machine, never in the library: which model Brenda
 // speaks with, who paints the pictures, which apps open a clip for surgery.
 // Loaded once at boot too, because the clip and media menus read it.
 let SETTINGS=null;
@@ -3547,7 +3547,7 @@ function speechCard(c){return `
       ${runonBtn(c)}
       ${lockBtn(c)}${copyBtn(c.id)}${dupBtn(c.id)}${muteBtn(c)}${delBtn(c.id)}
       <label class="mut dchk" style="font-size:11px"><input type="checkbox" ${SEL.has(c.id)?'checked':''}
-        onchange="pick(${c.id},this.checked)"> Discuss</label>
+        onchange="pick(${c.id},this.checked)"> Brenda</label>
     </div>
     <textarea id="t${c.id}" oninput="touched(${c.id})" onblur="flush(${c.id})"
       onfocus="setCur(${c.id})"${c.locked?' readonly':''}${(HEIGHT[c.id]||c.height)?` style="height:${HEIGHT[c.id]||c.height}px"`:''}>${esc(c.text)}</textarea>
@@ -5563,10 +5563,10 @@ async function assemble(){
   }
   open_(DOC.name,true); }
 
-// ── discuss ───────────────────────────────────────────────
-// The discuss agent streams: text as it is written, tool calls as they land.
+// ── the drama manager ─────────────────────────────────────
+// Brenda streams: text as it is written, tool calls as they land.
 // While it runs the Ask button is a Stop button, and every mutating tool call
-// schedules a quiet reload, so the cards appear in the deck as Claude places
+// schedules a quiet reload, so the cards appear in the deck as Brenda places
 // them — in a draft, never in the story itself; the bar over the deck is
 // where the author applies or discards what it made.
 let CHAT={running:false,fresh:false,t:null};
@@ -5642,13 +5642,14 @@ function chatNew(){
   $('log').innerHTML='<div class="m mut">A fresh conversation — the old one is forgotten on the next ask.</div>';
 }
 
-// Discuss needs a Claude on the machine. When there is none, the panel is an
-// invitation rather than an error: what it is, that it is optional, and the
-// two steps to turn it on. Signed-in-ness is only knowable by asking, so
-// that half arrives as an "auth" card on the first ask instead (see send()).
-const CHAT_INTRO='Ask about pacing or a passage — or hand over real work: '+
-  'a new scene, a casting, a whole story. Claude works in a draft; you apply '+
-  'it or discard it.\nSelected cards go along as context.';
+// Brenda needs something to think with. When the machine has no Claude and
+// no local model is configured, the panel is an invitation rather than an
+// error: who she is, that she is optional, and the two steps to wake her.
+// Signed-in-ness is only knowable by asking, so that half arrives as an
+// "auth" card on the first ask instead (see send()).
+const CHAT_INTRO='Ask Brenda about pacing or a passage, or hand her real '+
+  'work: a new scene, a casting, a whole story. She works in a draft; you '+
+  'apply it or discard it.\nSelected cards go along as context.';
 function paintDiscuss(){
   // a local provider from the settings tab needs no claude on the machine;
   // the claude check only gates the two providers that speak through it
@@ -5659,38 +5660,44 @@ function paintDiscuss(){
   if(!CHAT.running)$('sendb').disabled=!ok;
   const i=$('chatintro'); if(!i)return;
   if(ok){
-    const t=local?CHAT_INTRO.replace('Claude works','Your model works'):CHAT_INTRO;
+    // Brenda reads the same however she is being thought: that is the point
+    // of her having an identity of her own, and it is why this no longer
+    // rewrites the sentence when the provider is a local model.
+    const t=CHAT_INTRO;
     if(i.dataset.setup||i.textContent!==t){ i.dataset.setup=''; i.textContent=t; }
     return;
   }
   if(i.dataset.setup)return;
   i.dataset.setup='1';
-  i.innerHTML=`<div class="setup"><b>Discuss pairs Saga Studio with Claude</b>,
-    Anthropic’s AI — talk through a scene, or hand it real work that it builds
-    in a draft you review. It’s optional: everything else here works without it.
-    <br><br>To turn it on:<br>
+  i.innerHTML=`<div class="setup"><b>Brenda is the drama manager here</b>, and
+    she needs a model to think with. Talk through a scene, or hand her real
+    work that she builds in a draft you review. She’s optional: everything
+    else here works without her.
+    <br><br>To wake her:<br>
     1 · Install <a href="https://claude.com/claude-code" target="_blank" rel="noopener">Claude
     Code</a>: <code>npm install -g @anthropic-ai/claude-code</code><span
     class="cpy" onclick="copyCmd(this)">copy</span><br>
-    2 · Sign in once — open Terminal, run <code>claude</code>, and follow the
+    2 · Sign in once: open Terminal, run <code>claude</code>, and follow the
     sign-in. A Claude plan (Pro or Max) or an API key both work.<br><br>
     <span class="mut">Asks use your plan’s included usage, or your key’s
-    pay-per-use.</span><br><a onclick="refresh()">⟳ check again</a></div>`;
+    pay-per-use. A local model works just as well: point her at one in the
+    Settings tab, and she is the same Brenda either way.</span>
+    <br><a onclick="refresh()">⟳ check again</a></div>`;
 }
 function copyCmd(el){
   navigator.clipboard.writeText('npm install -g @anthropic-ai/claude-code')
     .then(()=>{ el.textContent='copied'; setTimeout(()=>el.textContent='copy',1200); });
 }
 
-// ── drafts ── the sandbox where the discuss agent works. The bar over the
-// deck is the author's side of the bargain: Claude proposes in a copy, and
-// only these two buttons — never the agent — decide what becomes real.
+// ── drafts ── the sandbox where Brenda works. The bar over the deck is the
+// author's side of the bargain: Brenda proposes in a copy, and only these two
+// buttons, never the agent herself, decide what becomes real.
 function drawDraftBar(){
   const b=$('draftbar');
   if(!DOC||!DOC.draft){ b.hidden=true; b.innerHTML=''; return; }
   const of=DOC.draft_of;
-  b.innerHTML=`<span>✎ ${of?`Claude’s draft of “${esc(of)}” — the story itself is untouched`
-      :'A draft story from Claude — not yet part of the library'}</span>
+  b.innerHTML=`<span>✎ ${of?`Brenda’s draft of “${esc(of)}”. The story itself is untouched`
+      :'A draft story from Brenda, not yet part of the library'}</span>
     <span style="flex:1"></span>
     <button class="tiny" onclick="draftApply()">${of?'Apply to the Story':'Keep It'}</button>
     <button class="tiny" onclick="draftDiscard()">Discard</button>`;

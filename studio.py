@@ -115,7 +115,7 @@ ENGINES_DIR = Path(os.environ.get("SAGA_ENGINES")
                    or (Path.home() / "Library/Application Support/Saga Studio/engines"
                        if sys.platform == "darwin"
                        else Path.home() / ".saga-studio/engines")).expanduser()
-# Editor settings — the author's own arrangements: which model Discuss speaks
+# Editor settings — the author's own arrangements: which model Brenda speaks
 # with, who paints the pictures, which apps a clip opens in for surgery. They
 # are per-MACHINE, kept beside the engines rather than in the library, because
 # a library travels (Export Everything, a copied folder) and an API key must
@@ -4047,7 +4047,7 @@ def fetch_source_link(url, dest):
                            f"{getattr(ex, 'reason', None) or ex}")
 
 
-# ── the discuss agent ───────────────────────────────────────────────────
+# ── Brenda, the drama manager ───────────────────────────────────────────
 # This used to be three lines: shell out, wait three minutes, print whatever
 # came back. Now the agent has hands and a memory. It runs headless Claude
 # Code with exactly one MCP server — saga_mcp.py, which speaks this studio's
@@ -4067,7 +4067,7 @@ CHAT_IDLE_S = 300               # silence this long means wedged, not thinking
 CHAT_MAX_S = 1800               # and no single ask runs past half an hour
 
 # ── the agent's memory ──────────────────────────────────────────────────
-# What Discuss keeps between conversations, CLAUDE.md-style: one markdown
+# What Brenda keeps between conversations, CLAUDE.md-style: one markdown
 # file in the library, because it is ABOUT these stories (a key is about a
 # machine and lives in settings; the distinction is the whole filing system).
 # Two kinds of entry share it: a journal the studio writes itself after any
