@@ -432,6 +432,19 @@ PROFILES = ROOT / "profiles.json"
 # position in `order` IS the chapter number, so inserting an episode between
 # two others renames nothing.
 SERIES = ROOT / "series.json"
+# ── the cast ────────────────────────────────────────────────────────────
+# Characters, locations, props and styles as things the library KNOWS, not
+# filenames somebody remembered (CAST.md is the spec). A cast member owns
+# reference plates and may link to a voice profile; a visual card will point
+# at it by name. Plates live OUTSIDE media/ on purpose: canon lives somewhere
+# a shot cannot be mistaken for it, and the pool stays what it is — the place
+# output lands. A plate is never a shot.
+CAST_FILE = ROOT / "cast.json"
+CAST = ROOT / "cast"                      # plate files: cast/<slug>/<file>
+# A slug is the name a stored ref will hold, so it wears the ref alphabet.
+# The slot (plate) name is the addressable half of a ref's second segment.
+CAST_SLUG_RE = re.compile(r"^[a-z0-9_-]{1,60}$")
+PLATE_RE = re.compile(r"^[a-z0-9_-]{1,40}$")
 # `engine` defaults to chatterbox so that adding a second engine changes nothing
 # until a profile is deliberately moved across — every wav already on disk keeps
 # its name and stays valid. `lang` and `speed` mean nothing to chatterbox and are
@@ -1585,17 +1598,18 @@ def save_series(s):
     SERIES.write_text(json.dumps(s, indent=1))
 
 
-def series_slug(title, taken):
+def series_slug(title, taken, fallback="series"):
     """Accents are folded rather than replaced, so "Cardon Poems" is what
     `Cardón Poems` becomes and not `card-n-poems`. This slug is the shelf's
     name on disk and, one day, its address on darkride, and a Canarian title
-    should not have to spell itself in ASCII to get a decent one."""
+    should not have to spell itself in ASCII to get a decent one. The cast
+    borrows it (fallback="member"): same alphabet, same manners."""
     t = unicodedata.normalize("NFKD", title or "")
     t = "".join(c for c in t if not unicodedata.combining(c))
     base = re.sub(r"[^a-z0-9_-]+", "-", t.lower()).strip("-")[:60]
-    slug, k = (base or "series"), 2
+    slug, k = (base or fallback), 2
     while slug in taken:
-        slug, k = f"{base}-{k}", k + 1
+        slug, k = f"{base or fallback}-{k}", k + 1
     return slug
 
 
@@ -1639,6 +1653,16 @@ def series_state():
                     "blurb": rec.get("blurb") or "", "cover": rec.get("cover") or "",
                     "order": mem, "created": rec.get("created") or ""})
     return out
+
+
+def series_of(name):
+    """Which shelf a story sits on, by the same claim rule series_state uses:
+    the shelf MADE first wins. Derived, never stored, and a story still knows
+    nothing about where it is shelved."""
+    for slug, rec in series().items():
+        if name in (rec.get("order") or []):
+            return slug
+    return ""
 
 
 def series_new(title):
@@ -1687,6 +1711,23 @@ def series_assign(name, to, at=None):
             at = max(0, min(int(at), len(shown)))
             o.insert(len(o) if at == len(shown) else o.index(shown[at]), name)
     save_series(recs)
+
+
+def cast():
+    """Every cast member, by slug. Missing or unreadable reads as empty, so a
+    library that has never heard of the cast behaves exactly as one did
+    before it existed — same manners as series() and for the same reason."""
+    if not CAST_FILE.exists():
+        return {}
+    try:
+        c = json.loads(CAST_FILE.read_text())
+    except (json.JSONDecodeError, OSError):
+        return {}
+    return c if isinstance(c, dict) else {}
+
+
+def save_cast(c):
+    CAST_FILE.write_text(json.dumps(c, indent=1))
 
 
 def import_md(title, md):
@@ -4442,6 +4483,10 @@ class H(BaseHTTPRequestHandler):
                                  for p in CLIPS.glob("*.wav")),
                                 key=lambda c: c["name"]),
                 "media": media_list(),
+                # the cast rides along whole: a registry of briefs and plate
+                # names is small next to the media list, and the tab and the
+                # board both draw straight from it
+                "cast": cast(),
                 "profiles": profiles(), "profile_counts": pcounts,
                 "clip_counts": ccounts, "media_counts": mcounts,
                 # which story knows each picture, and how — the visuals pool
@@ -4655,6 +4700,20 @@ class H(BaseHTTPRequestHandler):
             if not f:
                 return self._send(404, b"", "text/plain")
             # film runs to real megabytes; stream it like a book
+            return self._send_file(f, MEDIA_MIME.get(f.suffix.lower(),
+                                                     "application/octet-stream"))
+        if u.path == "/api/plate":
+            # a plate by member and file name. Both halves are checked against
+            # the alphabets their writers use, so this cannot walk a path.
+            slug = q.get("slug", [""])[0]
+            fn = q.get("f", [""])[0]
+            if (not CAST_SLUG_RE.match(slug)
+                    or not re.fullmatch(r"[a-z0-9_.-]{1,80}", fn)
+                    or ".." in fn):
+                return self._send(404, b"", "text/plain")
+            f = CAST / slug / fn
+            if not f.is_file():
+                return self._send(404, b"", "text/plain")
             return self._send_file(f, MEDIA_MIME.get(f.suffix.lower(),
                                                      "application/octet-stream"))
         if u.path == "/api/share_info":
@@ -4932,13 +4991,67 @@ class H(BaseHTTPRequestHandler):
         finally:
             Path(tmp).unlink(missing_ok=True)
 
+    def _cast_upload(self, u):
+        """A plate arriving from Finder, straight into a member's folder.
+
+        Same manners as the pool: a still is pressed to WebP on arrival, and
+        nothing is ever overwritten — a plate's file name is about to live
+        inside stored refs, so a second arrival under the same stem gets a
+        new name rather than replacing the first. The slot is named after the
+        file and is the author's to rename; the first plate a member owns
+        becomes its key, since a key of nothing serves nobody."""
+        qq = parse_qs(u.query)
+        slug = qq.get("slug", [""])[0]
+        fn = qq.get("fn", ["plate"])[0]
+        ext = Path(fn).suffix.lower()
+        if ext not in IMG_EXT:
+            return self._send(400, {"error": f"a plate is a picture — "
+                                    f"png/jpg/webp/gif, not “{ext or fn}”"})
+        if not CAST_SLUG_RE.match(slug):
+            return self._send(404, {"error": "no such cast member"})
+        fd, tmp = tempfile.mkstemp(dir=ROOT, prefix=".plate-", suffix=ext)
+        try:
+            with os.fdopen(fd, "wb") as f:
+                self._read_body_to(f)
+            w = webp_still(Path(tmp))
+            if w:
+                Path(tmp).unlink(missing_ok=True)
+                tmp, ext = str(w), ".webp"
+            with _docmut:
+                c = cast()
+                m = c.get(slug)
+                if m is None:
+                    return self._send(404, {"error": "no such cast member"})
+                stem = (re.sub(r"[^a-z0-9_-]+", "-", Path(fn).stem.lower())
+                        .strip("-")[:40] or "plate")
+                folder = CAST / slug
+                folder.mkdir(parents=True, exist_ok=True)
+                taken = {p.stem for p in folder.iterdir() if p.is_file()}
+                fname = _free_name(taken, stem, "new") + ext
+                dest = folder / fname
+                os.replace(tmp, dest)          # same filesystem: tmp is in ROOT
+                os.chmod(dest, 0o644)          # mkstemp makes it 0600
+                plates = m.setdefault("plates", {})
+                slot = _free_name(set(plates), stem, "new")
+                plates[slot] = {"file": fname}
+                if not m.get("key"):
+                    m["key"] = slot
+                save_cast(c)
+            return self._send(200, {"ok": True, "plate": slot, "file": fname})
+        except Exception as ex:
+            return self._send(400, {"error": f"{type(ex).__name__}: {ex}"})
+        finally:
+            Path(tmp).unlink(missing_ok=True)
+
     def do_POST(self):
         u = urlparse(self.path)
         if not self._authed():
             return self._send(401, {"error": "unauthorised"})
         if u.path == "/api/import_archive":
             return self._import_archive(u)
-        if u.path == "/api/media/upload":      # raw body, so before the JSON parse
+        if u.path == "/api/cast/upload":       # raw body, so before the JSON parse
+            return self._cast_upload(u)
+        if u.path == "/api/media/upload":      # likewise
             return self._media_upload(u)
         if u.path == "/api/clip/upload":       # likewise
             return self._clip_upload(u)
@@ -5211,6 +5324,7 @@ class H(BaseHTTPRequestHandler):
         # slow and read-only — exactly the shape that must not hold the lock
         lock = None if u.path in ("/api/chat", "/api/assemble", "/api/book_preview",
                                   "/api/reveal", "/api/open_link",
+                                  "/api/cast/reveal", "/api/cast/open",
                                   "/api/profile/impact",
                                   # slow and read-only, the same shape as
                                   # assemble — they must not block typing
@@ -6251,6 +6365,171 @@ class H(BaseHTTPRequestHandler):
                     series_assign(d["name"], d.get("to") or None, d.get("at"))
                 except KeyError:
                     return self._send(404, {"error": "no such series"})
+                return self._send(200, {"ok": True})
+
+            # ── the cast ── every verb here writes cast.json alone (an
+            # upload adds one file under cast/<slug>/ and is handled above,
+            # before the JSON parse). No document is opened and no card is
+            # touched: the registry is a library-level thing, like a shelf.
+            # Slots may be renamed freely — a slot is a key in `plates`, and
+            # the file underneath never moves once a stored ref can name it.
+            if u.path == "/api/cast/new":
+                t = _clean(d.get("title"), 80)
+                if not t:
+                    return self._send(400, {"error": "a title is needed"})
+                c = cast()
+                slug = series_slug(t, c, fallback="member")
+                c[slug] = {"kind": _clean(d.get("kind"), 24).lower() or "character",
+                           "title": t,
+                           "brief": _clean(d.get("brief"), 500),
+                           "scope": _clean(d.get("scope"), 60),
+                           "key": "", "plates": {},
+                           "created": time.strftime("%Y-%m-%d %H:%M")}
+                save_cast(c)
+                return self._send(200, {"ok": True, "slug": slug})
+            if u.path == "/api/cast/edit":
+                c = cast()
+                m = c.get(d.get("slug") or "")
+                if m is None:
+                    return self._send(404, {"error": "no such cast member"})
+                for k, cap in (("title", 80), ("kind", 24), ("brief", 500),
+                               ("scope", 60)):
+                    if k not in d:
+                        continue
+                    v = _clean(d.get(k), cap)
+                    if not v and k == "title":
+                        return self._send(400, {"error": "a title is needed"})
+                    m[k] = v.lower() if k == "kind" else v
+                if "key" in d:
+                    v = str(d.get("key") or "")
+                    if v and v not in (m.get("plates") or {}):
+                        return self._send(400, {"error": f'no plate "{v}" '
+                                                "to be the key"})
+                    m["key"] = v
+                if "voice" in d:
+                    # engine → profile name in profiles.json. A LINK, never a
+                    # copy: a profile is engine-bound and a character is not,
+                    # which is why the map has one seat per engine.
+                    v = d.get("voice")
+                    if not isinstance(v, dict):
+                        return self._send(400, {"error": "voice is a map of "
+                                                "engine to profile"})
+                    m["voice"] = {e: _clean(v[e], 60) for e in ENGINES
+                                  if isinstance(v.get(e), str) and v[e].strip()}
+                    if not m["voice"]:
+                        m.pop("voice", None)
+                save_cast(c)
+                return self._send(200, {"ok": True})
+            if u.path == "/api/cast/delete":
+                # the member leaves the registry; its folder and files stay
+                # on disk. Nothing in the app deletes a picture — pool law.
+                c = cast()
+                if c.pop(d.get("slug") or "", None) is None:
+                    return self._send(404, {"error": "no such cast member"})
+                save_cast(c)
+                return self._send(200, {"ok": True})
+            if u.path == "/api/cast/plate/rename":
+                c = cast()
+                m = c.get(d.get("slug") or "")
+                if m is None:
+                    return self._send(404, {"error": "no such cast member"})
+                old = str(d.get("from") or "")
+                new = re.sub(r"[^a-z0-9_-]+", "-",
+                             str(d.get("to") or "").lower()).strip("-")[:40]
+                plates = m.get("plates") or {}
+                if old not in plates:
+                    return self._send(404, {"error": f'no plate "{old}"'})
+                if not new:
+                    return self._send(400, {"error": "a slot name is needed"})
+                if new != old and new in plates:
+                    return self._send(400, {"error": f'"{new}" is already '
+                                            "a slot here"})
+                # one key rewritten in place, order kept, no bytes touched
+                m["plates"] = {(new if k == old else k): v
+                               for k, v in plates.items()}
+                if m.get("key") == old:
+                    m["key"] = new
+                save_cast(c)
+                return self._send(200, {"ok": True, "plate": new})
+            if u.path == "/api/cast/plate/edit":
+                # look and view are labels, not addresses: free text, either
+                # may be empty, and the slot stays the only name a ref holds
+                c = cast()
+                m = c.get(d.get("slug") or "")
+                p = (m or {}).get("plates", {}).get(str(d.get("plate") or ""))
+                if p is None:
+                    return self._send(404, {"error": "no such plate"})
+                for k in ("look", "view"):
+                    if k not in d:
+                        continue
+                    v = _clean(d.get(k), 60)
+                    if v:
+                        p[k] = v
+                    else:
+                        p.pop(k, None)
+                save_cast(c)
+                return self._send(200, {"ok": True})
+            if u.path == "/api/cast/plate/remove":
+                # unlink, never delete: the slot goes, the file stays in the
+                # member's folder as a candidate — the same law as dropping a
+                # variant from a card's shortlist, and the reason no undo
+                # machinery is needed here.
+                c = cast()
+                m = c.get(d.get("slug") or "")
+                if m is None:
+                    return self._send(404, {"error": "no such cast member"})
+                nm = str(d.get("plate") or "")
+                p = (m.get("plates") or {}).pop(nm, None)
+                if p is None:
+                    return self._send(404, {"error": f'no plate "{nm}"'})
+                if p.get("file"):
+                    cand = m.setdefault("candidates", [])
+                    if p["file"] not in cand:
+                        cand.append(p["file"])
+                if m.get("key") == nm:
+                    m["key"] = next(iter(m.get("plates") or {}), "")
+                save_cast(c)
+                return self._send(200, {"ok": True})
+            if u.path == "/api/cast/plate/order":
+                c = cast()
+                m = c.get(d.get("slug") or "")
+                if m is None:
+                    return self._send(404, {"error": "no such cast member"})
+                plates = m.get("plates") or {}
+                want = [str(x) for x in (d.get("order") or [])
+                        if str(x) in plates]
+                # the listed slots in their new order, then anything the list
+                # missed — a stale view must not be able to drop a plate
+                m["plates"] = {k: plates[k] for k in
+                               want + [k for k in plates if k not in want]}
+                save_cast(c)
+                return self._send(200, {"ok": True})
+            if u.path == "/api/cast/reveal":
+                # the member's folder in Finder — where its plates live, and
+                # the honest answer to "where did my picture go"
+                slug = str(d.get("slug") or "")
+                if not CAST_SLUG_RE.match(slug) or cast().get(slug) is None:
+                    return self._send(404, {"error": "no such cast member"})
+                folder = CAST / slug
+                if not folder.is_dir():
+                    return self._send(404, {"error": "no plates on disk yet — "
+                                            "drop a picture on the board first"})
+                subprocess.run([OPEN_CMD, str(folder)], check=False)
+                return self._send(200, {"ok": True})
+            if u.path == "/api/cast/open":
+                # one plate, in whatever this machine opens pictures with.
+                # The path is built from the registry, never the request.
+                slug = str(d.get("slug") or "")
+                if not CAST_SLUG_RE.match(slug):
+                    return self._send(404, {"error": "no such cast member"})
+                m = cast().get(slug)
+                p = (m or {}).get("plates", {}).get(str(d.get("plate") or ""))
+                f = (CAST / slug / p["file"]) if p and p.get("file") else None
+                if (f is None or not f.is_file()
+                        or not re.fullmatch(r"[a-z0-9_.-]{1,80}", p["file"])
+                        or ".." in p["file"]):
+                    return self._send(404, {"error": "no file for that plate"})
+                subprocess.run([OPEN_CMD, str(f)], check=False)
                 return self._send(200, {"ok": True})
 
             # ── drafts ── the discuss agent's sandbox. A draft is an

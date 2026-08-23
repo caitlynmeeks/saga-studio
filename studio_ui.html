@@ -41,6 +41,7 @@ aside .pane{overflow-y:auto;padding:12px;min-height:0;display:none}
 body[data-side=stories] #sideStories,
 body[data-side=voices] #sideVoices,
 body[data-side=clips] #sideClips,
+body[data-side=cast] #sideCast,
 body[data-side=publish] #sidePublish,
 body[data-side=settings] #sideSettings{display:block}
 /* the settings tab's little forms: label above field, quiet and narrow */
@@ -253,6 +254,41 @@ input[type=number]{width:62px}
 #draftbar[hidden]{display:none}
 .draftb{font-size:10px;color:var(--amber);border:1px solid #5c4a26;
   border-radius:4px;padding:0 5px;margin-left:6px;vertical-align:1px}
+/* ── the cast board ── a mode over the deck, not a place (CAST.md §7b):
+   body[data-mode=cast] swaps the card stack for one member's plates, with a
+   bar over it the way the draft bar sits over a draft. The stage dock is
+   untouched — a render set going keeps playing under the board. The doc's
+   own bars step aside with the deck: they are about cards, and no cards
+   are showing. */
+#castbar{display:none;gap:8px;align-items:center;padding:7px 12px;flex:none;
+  font-size:12.5px;color:var(--green);background:#0e1611;
+  border-bottom:1px solid #274b31}
+body[data-mode=cast] #castbar{display:flex}
+#castboard{display:none;flex:1;min-height:0;overflow-y:auto;padding:14px 18px}
+body[data-mode=cast] #castboard{display:block}
+body[data-mode=cast] #main,body[data-mode=cast] #frbar,
+body[data-mode=cast] #draftbar,body[data-mode=cast] #vfbar{display:none}
+#castboard .bhead,#castboard .bwrap{max-width:860px;margin:0 auto}
+/* each look gets its own shelf of plates; a tile is the picture with its
+   slot name under it, and the key wears the star */
+.lookbar{display:flex;gap:8px;align-items:baseline;margin:18px 0 8px;
+  border-bottom:1px solid var(--line);padding-bottom:4px}
+.lookbar b{color:var(--bright);font-size:12px}
+.plategrid{display:flex;flex-wrap:wrap;gap:10px}
+.plate{width:150px;border:1px solid var(--line);border-radius:8px;
+  overflow:hidden;cursor:grab;background:var(--panel)}
+.plate img{width:100%;height:104px;object-fit:cover;display:block}
+.plate .pcap{display:flex;gap:4px;align-items:center;padding:3px 7px 2px;
+  font-size:11px}
+.plate .pcap .star{color:var(--amber)}
+.plate .pview{font-size:10px;color:var(--faint);padding:0 7px 4px}
+.plate.key{border-color:#4a3d22}
+.plate.dragging{opacity:.4}
+.plate.hot{outline:2px solid var(--green);outline-offset:-2px}
+#castdrop{border:1.5px dashed var(--line);border-radius:8px;padding:18px 10px;
+  text-align:center;color:var(--faint);cursor:pointer;font-size:12px;
+  margin:16px 0 6px}
+#castdrop.hot{border-color:var(--green);color:var(--green);background:#131a17}
 #ask{width:100%;height:64px;resize:vertical}
 .pill{font-size:10.5px;border:1px solid var(--line);border-radius:99px;padding:1px 7px;color:var(--faint)}
 /* Tag chips live in the card head. Quiet by default — a tag is a label until a
@@ -515,6 +551,7 @@ color:var(--faint);margin:0 0 9px;font-weight:600}
    <button id="sbStories" onclick="setSide('stories')">Stories</button>
    <button id="sbVoices" onclick="setSide('voices')">Voices</button>
    <button id="sbClips" onclick="setSide('clips')">Media</button>
+   <button id="sbCast" onclick="setSide('cast')">Cast</button>
    <button id="sbPublish" onclick="setSide('publish')">Publish</button>
    <button id="sbSettings" onclick="setSide('settings')" title="Editor settings"
      style="margin-left:auto;padding:3px 7px 5px">⚙</button>
@@ -612,6 +649,29 @@ color:var(--faint);margin:0 0 9px;font-weight:600}
     accept="image/*,video/*,.png,.jpg,.jpeg,.webp,.gif,.mp4,.webm,.mov">
  </div>
 
+ <div class="pane" id="sideCast">
+  <h2>Cast</h2>
+  <div class="mut" style="font-size:11px;margin-bottom:8px">Characters, places,
+    props and styles the pictures hold to. Open one to arrange its reference
+    plates.</div>
+  <button class="pri" onclick="newMemberPanel()" style="width:100%"
+    title="a thing the library knows by name — its pictures stop drifting because they are all painted against the same plates">+ New Member</button>
+  <div id="newmember" hidden style="margin-top:8px;border:1px solid var(--line);border-radius:7px;padding:10px">
+    <input id="nm_title" placeholder="e.g. Maisie Ardilla…" style="width:100%"
+      onkeydown="if(event.key==='Enter')createMember()">
+    <input id="nm_kind" list="kindlist" placeholder="kind — character, location, prop, style…"
+      style="width:100%;margin-top:6px" onkeydown="if(event.key==='Enter')createMember()">
+    <datalist id="kindlist"></datalist>
+    <button class="pri" onclick="createMember()" style="width:100%;margin-top:6px">Create</button>
+  </div>
+  <input class="qry" id="qcast" placeholder="filter the cast…"
+    style="margin-top:12px" oninput="setQry('cast')">
+  <label class="mut" style="font-size:11px;display:block;margin:4px 0 6px"
+    title="a member's scope decides where it is SHOWN, never which one a ref finds">
+    <input type="checkbox" id="castall" onchange="renderCast()"> every scope, not just this shelf's</label>
+  <div id="cast"></div>
+ </div>
+
  <div class="pane" id="sidePublish">
   <h2>Publish</h2>
   <div id="pubwrap"></div>
@@ -707,7 +767,9 @@ color:var(--faint);margin:0 0 9px;font-weight:600}
   <div id="frbar" hidden></div>
   <div id="draftbar" hidden></div>
   <div id="vfbar" hidden></div>
+  <div id="castbar"></div>
   <main id="main"><p class="mut">Drop a markdown file on the left to begin.</p></main>
+  <div id="castboard"></div>
   <!-- The stage's engine room, permanently hidden. A same-origin iframe
        inherits the editor's clicks for the autoplay permission, so the
        SOUND lives here and always has; display:none does not stop an
@@ -890,7 +952,8 @@ function setQry(list){
   const el=$('q'+list);
   QRY[list]=(el?el.value:'').trim().toLowerCase();
   ({projects:paintProjects, clips:renderClips,
-    media:renderMedia, profiles:renderProfileList}[list]||function(){})();
+    media:renderMedia, profiles:renderProfileList,
+    cast:renderCast}[list]||function(){})();
 }
 const hits=(q,...fields)=>!q||fields.some(
   f=>String(f||'').toLowerCase().includes(q));
@@ -1111,6 +1174,8 @@ async function refresh(){
       title="a shelf to keep stories on. The order you put them in is the order they are read."
     >&#65291; Series</button>`+sortBar('projects','Recent');
   paintProjects();
+  if(document.body.dataset.side==='cast')renderCast();
+  if(document.body.dataset.mode==='cast')renderBoard();
   const b=STATE.bake;
   $('bakeb').disabled=b.running;
   $('stopb').hidden=!b.running;
@@ -1140,7 +1205,11 @@ async function refresh(){
 }
 
 // Switching document throws the card list away, so bank the edits first.
-async function openProject(name){ await flushAll(); await open_(name);
+// Opening a story is an intent to EDIT it, so the cast board steps aside and
+// the deck comes back — the Cast tab itself stays wherever it was.
+async function openProject(name){
+  if(document.body.dataset.mode==='cast')closeBoard();
+  await flushAll(); await open_(name);
   if(STAGE)STAGE.postMessage({type:'open',name});     // the stage follows along
 }
 
@@ -1803,7 +1872,7 @@ async function updateApply(){
 }
 
 // ── the sidebar's tabs ────────────────────────────────────
-const SIDES=['stories','voices','clips','publish','settings'];
+const SIDES=['stories','voices','clips','cast','publish','settings'];
 function setSide(t){
   if(!SIDES.includes(t))t='stories';
   document.body.dataset.side=t;
@@ -1814,6 +1883,7 @@ function setSide(t){
   // Guarded on STATE: this runs once at parse time to restore the last tab,
   // and renderClips leans on helpers declared further down the file.
   if(t==='clips'&&STATE.clips){ renderClips(); renderMedia(); }
+  if(t==='cast'&&STATE.cast)renderCast();
   if(t==='voices')loadEngines();
   if(t==='publish'&&STATE.projects)renderPublish();
   if(t==='settings')loadSettings();
@@ -2726,6 +2796,353 @@ $('mediafile').onchange=async e=>{
   await refresh(); renderMedia();
   if(id!=null&&DOC)open_(DOC.name,true,id);
 };
+
+// ── the cast ──────────────────────────────────────────────
+// Characters, locations, props and styles as things the library knows by
+// name (CAST.md). Two surfaces for two jobs: the sidebar tab is for
+// REACHING — a narrow list grouped by kind, filtered by the open story's
+// shelf — and the board is for WORKING, one member's plates grouped by
+// look, with the deck's width. The board takes over the deck (this app has
+// no modals, on purpose) and is a function of the member and its plates
+// ALONE: it must never read DOC, which is what would keep it able to
+// become its own window on a second display one day.
+let CASTSEL=null;                 // whose board the deck is wearing
+let DRAGPLATE=null;               // a plate mid-reorder, so file drops stand aside
+let CFOLD={};                     // folded kind groups, per machine
+try{ CFOLD=JSON.parse(localStorage.getItem('saga.cfold')||'{}'); }catch(e){}
+function foldCast(k){
+  CFOLD[k]=!CFOLD[k];
+  try{ localStorage.setItem('saga.cfold',JSON.stringify(CFOLD)); }catch(e){}
+  renderCast();
+}
+// which shelf the open story sits on. The claim rule already ran in
+// series_state, so the first shelf listing this story is the one that owns
+// it — the TAB may ask this (filtering is its job); the board never does.
+function castShelf(){
+  if(!DOC)return '';
+  for(const s of STATE.series||[])
+    if((s.order||[]).includes(DOC.name))return s.slug;
+  return '';
+}
+const KINDORDER=['character','location','prop','style'];
+// slugs ride inside quoted inline handlers, so only the ref alphabet gets
+// drawn at all — the server never mints anything else; this guards the
+// hand-edited registry
+const castRows=()=>Object.entries(STATE.cast||{})
+  .filter(([slug])=>/^[a-z0-9_-]{1,60}$/.test(slug))
+  .map(([slug,m])=>({slug,...m}));
+// one wrapper for every cast verb: errors land in the footer; success
+// refreshes the state and re-dresses whatever cast surface is showing
+async function castApi(p,b,quiet){
+  let r; try{ r=await api(p,b); }catch(ex){ r={error:String(ex)}; }
+  if(r.error){ $('status').innerHTML=`<span class="warn">${esc(r.error)}</span>`; return null; }
+  if(!quiet){ await refresh(); renderBoard(true); }
+  return r;
+}
+function castThumb(m){
+  const p=(m.plates||{})[m.key]||Object.values(m.plates||{})[0];
+  return p&&p.file
+    ?`<img src="/api/plate?slug=${m.slug}&f=${encodeURIComponent(p.file)}" loading="lazy"
+       style="height:30px;width:44px;object-fit:cover;border-radius:4px;flex:none">`
+    :`<span style="width:44px;text-align:center;flex:none" title="no plates yet">🎭</span>`;
+}
+function castRow(m){
+  const n=Object.keys(m.plates||{}).length;
+  return `<div class="proj ${CASTSEL===m.slug?'sel':''}"
+    onclick="openBoard('${m.slug}')" oncontextmenu="castMenu(event,'${m.slug}')"
+    title="open the board — plates, looks, the key">
+    <div style="display:flex;gap:6px;align-items:center">
+      ${castThumb(m)}
+      <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(m.title||m.slug)}</span>
+    </div>
+    <div class="meta">@${m.slug} · ${n||'no'} plate${n===1?'':'s'}${
+      m.scope?' · '+esc(m.scope):''}</div>
+  </div>`;
+}
+function renderCast(){
+  const box=$('cast'); if(!box)return;
+  const all=castRows();
+  if(!all.length)
+    return void(box.innerHTML='<span class="mut" style="font-size:12px">'+
+      'nobody yet — a cast member is a character, a place, a prop or a '+
+      'style the pictures hold to</span>');
+  // scope decides where a member is SHOWN, never which one is found: with
+  // no story open there is nothing to filter against, so everyone shows
+  const shelf=castShelf(), showall=!!($('castall')&&$('castall').checked);
+  const rows=all.filter(m=>showall||!DOC||!m.scope||m.scope===shelf);
+  const q=QRY.cast;
+  if(q){   // searching flattens, as everywhere: a match in a shut fold is no match
+    const found=rows.filter(m=>hits(q,m.slug,m.title,m.kind,m.brief));
+    return void(box.innerHTML=found.length?found.map(castRow).join(''):nomatch);
+  }
+  const groups=new Map();
+  for(const m of rows){
+    const k=(m.kind||'').trim()||'other';
+    if(!groups.has(k))groups.set(k,[]);
+    groups.get(k).push(m);
+  }
+  const order=[...groups.keys()].sort((a,b)=>{
+    const ia=KINDORDER.indexOf(a), ib=KINDORDER.indexOf(b);
+    if((ia<0)!==(ib<0))return ia<0?1:-1;      // the four that name themselves first
+    return ia<0?a.localeCompare(b):ia-ib;
+  });
+  let html='';
+  for(const k of order){
+    const mem=groups.get(k).sort((a,b)=>
+      String(a.title||a.slug).localeCompare(String(b.title||b.slug)));
+    const fold=!!CFOLD[k];
+    html+=`<div class="sbar mgrp" data-k="${aq(k)}">
+      <span class="fold">${fold?'▸':'▾'}</span>
+      <b style="text-transform:uppercase;font-size:10.5px;letter-spacing:.08em">${
+        esc(k+(/s$/.test(k)?'':'s'))}</b>
+      <span style="flex:1"></span>
+      <span class="mut" style="font-size:11px">${mem.length}</span></div>`;
+    if(fold)continue;
+    html+='<div class="smem in">'+mem.map(castRow).join('')+'</div>';
+  }
+  const hid=all.length-rows.length;
+  if(hid)html+=`<div class="mut" style="font-size:11px;margin-top:6px">${hid} more scoped to other shelves</div>`;
+  box.innerHTML=html;
+  // delegated, as the pool tree: a kind is free text, and free text has no
+  // business inside a quoted handler
+  document.querySelectorAll('#cast .mgrp[data-k]').forEach(el=>
+    el.addEventListener('click',e=>{ e.stopPropagation(); foldCast(el.dataset.k); }));
+}
+function castMenu(e,slug){
+  const m=(STATE.cast||{})[slug]; if(!m)return;
+  openCtx(e,[
+    {label:'Rename…', run:()=>{ openCtx(e,[]);
+      ctxAsk(m.title||slug,'what a human calls it','rename',
+        t=>castApi('/api/cast/edit',{slug,title:t})); }},
+    {label:'Show its Folder', run:()=>castApi('/api/cast/reveal',{slug},true)},
+    '-',
+    {label:'Remove from the Cast…', danger:true, run:()=>removeMember(slug)},
+  ]);
+}
+async function removeMember(slug){
+  const m=(STATE.cast||{})[slug]; if(!m)return;
+  const n=Object.keys(m.plates||{}).length;
+  if(!confirm(`Remove “${m.title||slug}” from the cast?\n\n`+
+    (n?`Its ${n} plate${n===1?'':'s'} stay on disk in cast/${slug}/ — only the registry forgets it.`
+      :'Nothing on disk goes with it.')))return;
+  if(CASTSEL===slug)closeBoard();
+  await castApi('/api/cast/delete',{slug});
+}
+function newMemberPanel(){
+  const p=$('newmember'); p.hidden=!p.hidden;
+  if(!p.hidden){
+    const kinds=new Set(KINDORDER);
+    for(const m of castRows())if((m.kind||'').trim())kinds.add(m.kind.trim());
+    $('kindlist').innerHTML=[...kinds].map(k=>`<option value="${aq(k)}">`).join('');
+    $('nm_title').focus();
+  }
+}
+async function createMember(){
+  const t=$('nm_title').value.trim(); if(!t)return $('nm_title').focus();
+  const kind=$('nm_kind').value.trim().toLowerCase();
+  // born scoped to the shelf being worked on: a global debut is a choice
+  // (one field on the board), not a default that clutters every story
+  const r=await castApi('/api/cast/new',{title:t,kind,scope:castShelf()});
+  if(!r)return;
+  $('nm_title').value=''; $('nm_kind').value=''; $('newmember').hidden=true;
+  openBoard(r.slug);
+}
+
+// ── the board ── it swaps in for the deck; body.dataset.mode carries it
+function openBoard(slug){
+  CASTSEL=slug;
+  document.body.dataset.mode='cast';
+  if(document.body.dataset.side!=='cast')setSide('cast');
+  renderCast();               // the row lights up
+  renderBoard(true);
+}
+function closeBoard(){
+  CASTSEL=null;
+  document.body.dataset.mode='';
+  $('castboard').innerHTML='';
+  renderCast();               // the light goes out
+}
+function renderBoard(force){
+  if(!CASTSEL)return;
+  const m=(STATE.cast||{})[CASTSEL];
+  if(!m)return void closeBoard();          // removed under this board
+  const bd=$('castboard');
+  if(!force){
+    // a refresh mid-typing must not rebuild the field out from under the
+    // caret — the same bargain togglePaint strikes with its prompt box
+    const el=document.activeElement;
+    if(el&&bd.contains(el)&&/^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName))return;
+  }
+  $('castbar').innerHTML=`<span>✎ ${esc(m.title||CASTSEL)} · ${esc(m.kind||'member')}</span>
+    <span class="mut" style="font-size:11px">@${CASTSEL}</span>
+    <span style="flex:1"></span>
+    <button class="tiny" onclick="castApi('/api/cast/reveal',{slug:'${CASTSEL}'},true)"
+      title="the member's folder on disk — where its plates live">Show Folder</button>
+    <button class="tiny" onclick="closeBoard()">← back to the deck</button>`;
+  const profs=STATE.profiles||{}, engines=STATE.engines||[], voice=m.voice||{};
+  const shelves=STATE.series||[];
+  let html=`<div class="bhead">
+    <label class="stlab" style="margin:0"
+      title="goes into every prompt as words, next to the plates — a picture and a sentence agreeing beat either alone">brief
+    <textarea id="cbrief" rows="2" style="width:100%;resize:vertical;margin-top:2px"
+      placeholder="what every picture of ${aq(m.title||CASTSEL)} must agree on: species, clothes, age, mood…"
+      onblur="castApi('/api/cast/edit',{slug:'${CASTSEL}',brief:this.value})">${esc(m.brief||'')}</textarea></label>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:6px;align-items:end">
+      <label class="stlab" style="margin:0;flex:1;min-width:120px">kind
+        <input value="${aq(m.kind||'')}" list="kindlist"
+          onchange="castApi('/api/cast/edit',{slug:'${CASTSEL}',kind:this.value})"></label>
+      <label class="stlab" style="margin:0;flex:1;min-width:140px"
+        title="where this member is SHOWN in the Cast tab — a ref finds it from anywhere either way">shown on
+        <select onchange="castApi('/api/cast/edit',{slug:'${CASTSEL}',scope:this.value})">
+          <option value="">every shelf</option>
+          ${shelves.map(s=>`<option value="${aq(s.slug)}" ${m.scope===s.slug?'selected':''}>${esc(s.title)}</option>`).join('')}
+          ${m.scope&&!shelves.some(s=>s.slug===m.scope)
+            ?`<option value="${aq(m.scope)}" selected>${esc(m.scope)} (a shelf that has gone)</option>`:''}
+        </select></label>
+      ${engines.map(e=>`<label class="stlab" style="margin:0;flex:1;min-width:130px"
+        title="a LINK to a voice profile — the profile stays what it is; the character just knows it">voice · ${esc(e)}
+        <select onchange="setVoiceLink('${esc(e)}',this.value)">
+          <option value="">none</option>
+          ${Object.keys(profs).filter(n=>(profs[n].engine||'chatterbox')===e).sort().map(n=>
+            `<option value="${aq(n)}" ${voice[e]===n?'selected':''}>${esc(n)}</option>`).join('')}
+        </select></label>`).join('')}
+    </div>
+  </div><div class="bwrap">`;
+  const plates=Object.entries(m.plates||{});
+  if(!plates.length){
+    html+=`<div class="mut" style="font-size:12.5px;margin-top:14px">No plates
+      yet. A plate is reference artwork this member is painted against — the
+      turnaround, the three-quarter, the expressions — grouped by <i>look</i>
+      (the outfit, or the weather) once you name one.</div>`;
+  }else{
+    const looks=new Map();
+    for(const [slot,p] of plates){
+      const lk=(p.look||'').trim();
+      if(!looks.has(lk))looks.set(lk,[]);
+      looks.get(lk).push([slot,p]);
+    }
+    for(const [lk,ps] of looks){
+      // one unnamed group is just "the plates" — a header would be noise
+      if(!(looks.size===1&&!lk))
+        html+=`<div class="lookbar"><b>${lk?esc(lk):'<span class="mut" style="font-weight:400">no look named</span>'}</b>
+          <span class="mut" style="font-size:11px">${ps.length}</span></div>`;
+      else html+='<div style="margin-top:14px"></div>';
+      html+='<div class="plategrid">'+ps.map(([slot,p])=>plateTile(slot,p,m.key===slot)).join('')+'</div>';
+    }
+  }
+  html+=`<div id="castdrop">drop pictures here to add plates — or click to choose</div>
+    <div class="mut" style="font-size:11px;margin-bottom:10px">right-click a
+      plate for its slot name, look, view and the key ★ — drag to reorder.
+      Removing one unlinks it; the file stays in the folder.</div>
+    <input type="file" id="platefile" hidden multiple
+      accept="image/*,.png,.jpg,.jpeg,.webp,.gif"></div>`;
+  bd.innerHTML=html;
+  wireBoard();
+}
+function plateTile(slot,p,key){
+  return `<div class="plate ${key?'key':''}" draggable="true" data-slot="${aq(slot)}"
+    title="${aq(slot)} — drag to reorder · right-click for rename, key, look, view">
+    ${p.file?`<img src="/api/plate?slug=${CASTSEL}&f=${encodeURIComponent(p.file)}" loading="lazy" draggable="false">`
+      :'<div style="height:104px;display:grid;place-items:center" class="mut">no file</div>'}
+    <div class="pcap">${key?'<span class="star" title="the key — the default plate for the whole member">★</span>':''}
+      <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(slot)}</span></div>
+    ${p.view?`<div class="pview">${esc(p.view)}</div>`:''}
+  </div>`;
+}
+function wireBoard(){
+  const bd=$('castboard');
+  bd.querySelectorAll('.plate').forEach(el=>{
+    el.addEventListener('dragstart',e=>{
+      DRAGPLATE=el.dataset.slot; el.classList.add('dragging');
+      e.dataTransfer.effectAllowed='move';
+      try{ e.dataTransfer.setData('text/plain',el.dataset.slot); }catch(_){}
+    });
+    el.addEventListener('dragend',()=>{ DRAGPLATE=null;
+      bd.querySelectorAll('.plate').forEach(x=>x.classList.remove('dragging','hot')); });
+    el.addEventListener('dragover',e=>{
+      if(!DRAGPLATE||DRAGPLATE===el.dataset.slot)return;
+      e.preventDefault(); el.classList.add('hot');
+    });
+    el.addEventListener('dragleave',()=>el.classList.remove('hot'));
+    el.addEventListener('drop',e=>{
+      e.preventDefault(); e.stopPropagation();
+      const from=DRAGPLATE, to=el.dataset.slot; DRAGPLATE=null;
+      if(from&&to&&from!==to)reorderPlates(from,to);
+    });
+    el.addEventListener('contextmenu',e=>plateMenu(e,el.dataset.slot));
+  });
+  const dz=$('castdrop');
+  dz.onclick=()=>$('platefile').click();
+  ['dragenter','dragover'].forEach(k=>dz.addEventListener(k,e=>{
+    if(DRAGPLATE)return;                       // a reorder is not an arrival
+    e.preventDefault(); dz.classList.add('hot'); }));
+  ['dragleave','drop'].forEach(k=>dz.addEventListener(k,e=>{
+    e.preventDefault(); dz.classList.remove('hot'); }));
+  dz.addEventListener('drop',e=>{ if(!DRAGPLATE)uploadPlates(e.dataTransfer.files); });
+  $('platefile').onchange=e=>{ uploadPlates(e.target.files); e.target.value=''; };
+  // the whole board takes a Finder drop, the gesture #drop already teaches
+  bd.ondragover=e=>{ if(!DRAGPLATE)e.preventDefault(); };
+  bd.ondrop=e=>{ if(!DRAGPLATE){ e.preventDefault(); uploadPlates(e.dataTransfer.files); } };
+}
+async function setVoiceLink(engine,prof){
+  const m=(STATE.cast||{})[CASTSEL]; if(!m)return;
+  const v={...(m.voice||{})};
+  if(prof)v[engine]=prof; else delete v[engine];
+  await castApi('/api/cast/edit',{slug:CASTSEL,voice:v});
+}
+async function reorderPlates(from,to){
+  const m=(STATE.cast||{})[CASTSEL]; if(!m)return;
+  const order=Object.keys(m.plates||{}).filter(k=>k!==from);
+  const at=order.indexOf(to);
+  order.splice(at<0?order.length:at,0,from);   // dropped ON a tile lands before it
+  await castApi('/api/cast/plate/order',{slug:CASTSEL,order});
+}
+function plateMenu(e,slot){
+  const m=(STATE.cast||{})[CASTSEL]; if(!m)return;
+  const p=(m.plates||{})[slot]; if(!p)return;
+  openCtx(e,[
+    {label:m.key===slot?'It is the Key Plate':'Make it the Key',
+     disabled:m.key===slot,
+     run:()=>castApi('/api/cast/edit',{slug:CASTSEL,key:slot})},
+    {label:'Rename the Slot…', run:()=>{ openCtx(e,[]);
+      ctxAsk(slot,'slot name — 3q, sheet, angry…','rename',
+        t=>castApi('/api/cast/plate/rename',{slug:CASTSEL,from:slot,to:t})); }},
+    {label:'Set the Look…', run:()=>{ openCtx(e,[]);
+      ctxAsk(p.look||'','the outfit, or the weather — trenchcoat, night rain…','set',
+        t=>castApi('/api/cast/plate/edit',{slug:CASTSEL,plate:slot,look:t})); }},
+    {label:'Set the View…', run:()=>{ openCtx(e,[]);
+      ctxAsk(p.view||'','the angle — 3/4, front, turnaround, expression…','set',
+        t=>castApi('/api/cast/plate/edit',{slug:CASTSEL,plate:slot,view:t})); }},
+    ...(p.look||p.view?[{label:'Clear the Look and View',
+      run:()=>castApi('/api/cast/plate/edit',{slug:CASTSEL,plate:slot,look:'',view:''})}]:[]),
+    '-',
+    {label:'Open in your Viewer', run:()=>castApi('/api/cast/open',{slug:CASTSEL,plate:slot},true)},
+    '-',
+    {label:'Remove from its Slot', danger:true,
+     run:()=>castApi('/api/cast/plate/remove',{slug:CASTSEL,plate:slot})},
+  ]);
+}
+async function uploadPlates(list){
+  if(!CASTSEL||!list||!list.length)return;
+  const files=[...list].filter(f=>/\.(png|jpe?g|webp|gif)$/i.test(f.name));
+  if(!files.length)return void($('status').innerHTML=
+    '<span class="warn">a plate is a picture — png, jpg, webp or gif</span>');
+  let done=0;
+  for(const f of files){
+    $('status').textContent=`filing ${f.name}… (${done+1}/${files.length})`;
+    let j;
+    try{
+      const r=await fetch(`/api/cast/upload?slug=${CASTSEL}&fn=${encodeURIComponent(f.name)}`,
+        {method:'POST',body:f,headers:{'Content-Type':'application/octet-stream'}});
+      j=await r.json();
+    }catch(ex){ j={error:String(ex)}; }
+    if(j.error)return void($('status').innerHTML=`<span class="warn">${esc(j.error)}</span>`);
+    done++;
+  }
+  await refresh(); renderBoard(true);
+  $('status').innerHTML=`<span class="ok">${done} plate${done===1?'':'s'} filed</span>`+
+    ' — right-click one to name its slot, look and view';
+}
 
 // ── publish ───────────────────────────────────────────────
 // Three doors out of the studio, all working on the open episode. The
