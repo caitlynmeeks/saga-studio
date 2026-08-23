@@ -563,6 +563,16 @@ color:var(--faint);margin:0 0 9px;font-weight:600}
       <option value="0">off</option><option value="1">on</option></select></div>
   <div class="mut" style="font-size:10.5px;margin-bottom:8px">how captions arrive, on the stage
     and in the exported story — any card can override both on its subtitle row</div>
+  <div class="srow"><label>picture style</label>
+    <input id="st_stx" placeholder="words every paint leads with — night and rain…"
+      onchange="storyStyleSave()"></div>
+  <div class="srow"><label>style refs</label>
+    <input id="st_srefs" placeholder="@adventure-time/board … (space-separated)"
+      onchange="storyStyleSave()"></div>
+  <div class="mut" style="font-size:10.5px;margin-bottom:8px">this story's tier of the
+    picture style. The shelf has its own tier underneath (right-click the shelf),
+    every visual card shows what it wears on its paint row, and any card can
+    switch style off there</div>
   <div style="display:flex"><span style="flex:1"></span>
     <button class="tiny" onclick="toggleStoryPanel()">Close</button></div>
 </div>
@@ -2477,6 +2487,7 @@ function seriesMenu(e,slug){
       ctxAsk(s.noun,'serial · collection · book','set',v=>editSeries(slug,{noun:v})); }},
     {label:`Its parts are “${s.member}s”…`, run:()=>{ openCtx(e,[]);
       ctxAsk(s.member,'episode · chapter · poem','set',v=>editSeries(slug,{member:v})); }},
+    {label:'Picture Style…', run:()=>seriesStyleAsk(e,slug)},
     '-',
     {label:'Export…', run:()=>exportSeries(slug)},
     '-',
@@ -2487,6 +2498,34 @@ async function editSeries(slug,fields){
   const r=await api('/api/series/edit',{slug,...fields});
   if(r.error)return void($('status').innerHTML=`<span class="warn">${esc(r.error)}</span>`);
   await refresh();
+}
+// the shelf's tier of the picture style (CAST.md §5): words every paint on
+// the shelf leads with, and refs that ride along — the Adventure Time line,
+// typed once here instead of once per card
+function seriesStyleAsk(e,slug){
+  const s=(STATE.series||[]).find(x=>x.slug===slug); if(!s)return;
+  const st=s.style||{};
+  openCtx(e,[]); if(!CTX)return;
+  CTX.innerHTML=`<div class="ctxask" style="flex-direction:column;align-items:stretch;min-width:300px">
+    <div class="mut" style="font-size:11px">the shelf's picture style — every ${esc(s.member)}'s paints lead with it; clear both fields to remove it</div>
+    <input id="ss_tx" value="${attr(st.text||'')}" placeholder="words — flat vector, thick even line, cel shading…">
+    <input id="ss_rf" value="${attr((st.refs||[]).join(' '))}" placeholder="refs — @adventure-time/board … (space-separated)">
+    <button class="pri">set</button></div>`;
+  const go=async()=>{
+    const text=$('ss_tx').value.trim();
+    const refs=$('ss_rf').value.split(/[\s,]+/).filter(Boolean);
+    closeCtx();
+    await editSeries(slug,{style:{text,refs}});
+    if(DOC)open_(DOC.name,true);   // open paint rows redraw their style line
+    $('status').innerHTML=(text||refs.length)
+      ?'<span class="ok">shelf style set</span> — its stories paint under it'
+      :'<span class="ok">shelf style cleared</span>';
+  };
+  CTX.querySelector('button.pri').onclick=go;
+  ['ss_tx','ss_rf'].forEach(i=>$(i).onkeydown=ev=>{ ev.stopPropagation();
+    if(ev.key==='Enter'){ ev.preventDefault(); go(); }
+    if(ev.key==='Escape'){ ev.preventDefault(); closeCtx(); } });
+  $('ss_tx').focus();
 }
 async function deleteSeries(slug){
   const s=(STATE.series||[]).find(x=>x.slug===slug); if(!s)return;
@@ -4478,9 +4517,31 @@ function visualCard(c){
 // story's pictures one cast, and the variants menu holds every painting
 // this card has tried on.
 let PAINTS=new Set();
+// the tiers above a card (CAST.md §5), composed exactly as the server
+// composes them — the dim line and the paint must agree, or the line lies
+function effStyle(){
+  const out={texts:[],refs:[]};
+  if(!DOC)return out;
+  const ser=(STATE.series||[]).find(s=>s.slug===castShelf());
+  for(const st of [ser&&ser.style,DOC.style]){
+    if(!st)continue;
+    if((st.text||'').trim())out.texts.push(st.text.trim());
+    for(const r of st.refs||[])if(!out.refs.includes(r))out.refs.push(r);
+  }
+  return out;
+}
 function paintRow(c){
   const nb=!!STATE.nanobanana;
+  const eff=effStyle(), tiered=eff.texts.length||eff.refs.length;
   return `<div id="pr${c.id}">
+    ${tiered?`<div class="arow" style="align-items:center">
+      <span class="mut" style="font-size:10.5px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap${c.nostyle?';text-decoration:line-through;opacity:.6':''}"
+        title="the style this card paints under — the shelf's tier, then the story's (⚙ story settings). Words lead the prompt, refs ride with the card's own. Visible because silent words in a prompt being debugged cost afternoons.">style: ${
+        esc(eff.texts.join(' · '))||'<i>references only</i>'}${
+        eff.refs.length?' '+eff.refs.map(r=>'+'+esc(r)).join(' '):''}</span>
+      <button class="tiny" onclick="setCard(${c.id},{nostyle:${c.nostyle?'false':'true'}},true)"
+        title="${c.nostyle?'dress this card in the shelf and story style again':'paint this card bare — no shelf or story style'}">${c.nostyle?'style off ✕':'styled ✓'}</button>
+    </div>`:''}
     <div class="arow">
       <textarea id="vp${c.id}" rows="2" style="flex:1;resize:vertical;min-height:38px"
         placeholder="${nb?'what to paint — subject, style, mood, light':'the paint prompt — a Gemini key is needed (hover the button below)'}"
@@ -4637,7 +4698,10 @@ async function genImage(id){
   const b=$('gb'+id); if(b){ b.disabled=true; b.textContent='painting…'; }
   $('s'+id).textContent='nanobanana is painting — about 15 seconds';
   const stem=(c.media||'').replace(/-new(-\d+)?$/,'')||(DOC.name+'-'+id);
-  const r=await api('/api/media/generate',{prompt,media:stem,ref:c.ref||''});
+  // name and id ride along so the style tiers above this card can dress the
+  // paint — and so the card's own `nostyle` is honoured where it is known
+  const r=await api('/api/media/generate',{prompt,media:stem,ref:c.ref||'',
+    name:DOC.name,id});
   if(r.error){
     if(b){ b.disabled=false; b.textContent=c.media?'Repaint':'Paint'; }
     $('s'+id).innerHTML=`<span style="color:var(--red)">${esc(r.error)}</span>`;
@@ -6160,7 +6224,25 @@ function toggleStoryPanel(){
     $('st_title').value=DOC.title||'';
     $('st_tw').value=DOC.typewriter?'1':'0';
     $('st_sfx').value=DOC.typesfx?'1':'0';
+    const st=DOC.style||{};
+    $('st_stx').value=st.text||'';
+    $('st_srefs').value=(st.refs||[]).join(' ');
   }
+}
+async function storyStyleSave(){
+  if(!DOC)return;
+  const text=$('st_stx').value.trim();
+  const refs=$('st_srefs').value.split(/[\s,]+/).filter(Boolean);
+  const r=await api('/api/story',{name:DOC.name,style:{text,refs}});
+  if(r.error)return void($('status').innerHTML=`<span class="warn">${esc(r.error)}</span>`);
+  DOC.style=r.style||null;
+  // show what the server kept — a ref that failed the alphabet is gone, and
+  // the field saying so beats the paint failing later
+  $('st_srefs').value=((r.style||{}).refs||[]).join(' ');
+  open_(DOC.name,true);            // open paint rows redraw their style line
+  $('status').innerHTML=r.style
+    ?'<span class="ok">story style set</span> — every visual card paints under it unless its paint row opts out'
+    :'<span class="ok">story style cleared</span>';
 }
 async function storySet(k,v){
   if(!DOC)return;

@@ -836,6 +836,8 @@ def paste_card(src):
         refs = ref_list(src.get("ref"))    # the paint panel's reference(s)
         if refs:
             c["ref"] = ref_store(refs)
+        if src.get("nostyle"):             # the opt-out travels with the copy
+            c["nostyle"] = True
         gen = [re.sub(r"[^a-z0-9_-]", "", str(x))
                for x in (src.get("gen") or []) if str(x or "").strip()]
         if gen:                            # its painted variants, names only
@@ -1145,7 +1147,7 @@ def cast_paint(slug, prompt, plate="", stem=""):
     return fname
 
 
-def generate_media(prompt, stem="", aspect="", ref=""):
+def generate_media(prompt, stem="", aspect="", ref="", style=None):
     """Ask the chosen illustrator for a picture and file it in the media pool.
 
     Every generation is new bytes, so the upload route's dedupe has nothing
@@ -1157,15 +1159,29 @@ def generate_media(prompt, stem="", aspect="", ref=""):
     `@member/plate` for cast plates (CAST.md §3). Each resolves to an image
     WITH a label saying what it is for, and each @member also brings its
     brief along as words — a picture and a sentence agreeing beat either
-    alone. Returns the name the pool filed it under."""
+    alone. `style` is style_of's (texts, refs) — the tiers above the card,
+    composed by the caller because only the caller knows the card said no.
+    Returns the name the pool filed it under."""
     if not prompt.strip():
         raise ValueError("an empty prompt paints nothing")
     aspect = aspect or "16:9"
     if aspect not in NB_ASPECTS:
         raise ValueError(f"aspect must be one of: {', '.join(NB_ASPECTS)}")
-    refs = [resolve_ref(r) for r in ref_list(ref)]
+    items = ref_list(ref)
+    stexts = []
+    if style:
+        stexts = [str(t).strip() for t in style[0] if str(t).strip()]
+        # tier refs ride AFTER the card's own: a local painter's canvas
+        # stays the subject, and §4's example sends the style board last
+        for r in ref_list(style[1]):
+            if r not in items:
+                items.append(r)
+    refs = [resolve_ref(r) for r in items]
     reg, members, seen = cast(), [], set()
-    for r in ref_list(ref):
+    # the tiers' words arrive as style members, broadest first, so the
+    # Style lines stand where §4 fixes them — before cast, setting, shot
+    members += [{"kind": "style", "brief": t} for t in stexts]
+    for r in items:
         slug = r[1:].partition("/")[0] if r.startswith("@") else ""
         if slug and slug not in seen and slug in reg:
             seen.add(slug)
@@ -1777,6 +1793,9 @@ def series_state():
                     "noun": rec.get("noun") or "series",
                     "member": rec.get("member") or "episode",
                     "blurb": rec.get("blurb") or "", "cover": rec.get("cover") or "",
+                    # the shelf's picture style (CAST.md §5) — the editor
+                    # shows it on every card it dresses, visible never silent
+                    "style": rec.get("style") or None,
                     "order": mem, "created": rec.get("created") or ""})
     return out
 
@@ -1854,6 +1873,25 @@ def cast():
 
 def save_cast(c):
     CAST_FILE.write_text(json.dumps(c, indent=1))
+
+
+def style_of(doc):
+    """The style tiers above a card (CAST.md §5), composed and never chosen:
+    the shelf's style, then the story's. Returns (texts, refs) — texts
+    broadest first, since that is the order the prompt states them in; refs
+    in the same order, deduped. The card's own tier is its note, as ever,
+    and a card opts out with `nostyle`, which is its caller's business."""
+    texts, refs = [], []
+    for st in ((series().get(series_of(doc.get("name") or "")) or {})
+               .get("style") or {},
+               doc.get("style") or {}):
+        t = str(st.get("text") or "").strip()
+        if t:
+            texts.append(t)
+        for r in ref_list(st.get("refs")):
+            if r not in refs:
+                refs.append(r)
+    return texts, refs
 
 
 def import_md(title, md):
@@ -5220,11 +5258,24 @@ class H(BaseHTTPRequestHandler):
         # typing. Each thread is its own request, so parallel paintings are
         # fine; the never-overwrite rule keeps their names from colliding.
         if u.path == "/api/media/generate":
+            # when the caller says which card is painting, the style tiers
+            # above it ride along (CAST.md §5) — unless the card said no.
+            # Composed here and not in generate_media because only the doc
+            # knows its shelf and only the card knows its `nostyle`.
+            style = None
+            nm = str(d.get("name") or "")
+            if nm:
+                doc = load(nm)
+                c = (next((x for x in doc["chunks"] if x["id"] == d.get("id")),
+                          None) if doc else None)
+                if doc and not (c or {}).get("nostyle"):
+                    style = style_of(doc)
             try:
                 mname = generate_media(str(d.get("prompt") or ""),
                                        str(d.get("media") or ""),
                                        str(d.get("aspect") or ""),
-                                       d.get("ref") or "")   # name or list
+                                       d.get("ref") or "",   # name or list
+                                       style)
             except (ValueError, RuntimeError) as ex:
                 return self._send(400, {"error": str(ex)})
             return self._send(200, {"ok": True, "media": mname,
@@ -5584,6 +5635,11 @@ class H(BaseHTTPRequestHandler):
                             c["ref"] = ref_store(ref_list(d["ref"]))
                             if not c["ref"]:
                                 c.pop("ref", None)
+                        if "nostyle" in d:     # this card opts out of the tiers
+                            if d["nostyle"]:
+                                c["nostyle"] = True
+                            else:
+                                c.pop("nostyle", None)
                         if "gen" in d:
                             # the variants painted for this visual card —
                             # names into the pool, presentation bookkeeping
@@ -5819,11 +5875,28 @@ class H(BaseHTTPRequestHandler):
                     if k in d:
                         doc[k] = bool(d[k])
                         changed = True
+                if "style" in d:
+                    # the story's picture style (CAST.md §5): a TOP-LEVEL doc
+                    # key, deliberately not a corner of params — params is
+                    # the delivery bag, and style is not delivery. It rides
+                    # with the doc through save, copy and export for free.
+                    st = d.get("style") or {}
+                    if not isinstance(st, dict):
+                        return self._send(400, {"error": "style is "
+                                                "{text, refs}"})
+                    txt = _clean(st.get("text"), 500)
+                    refs = ref_list(st.get("refs"))[:8]
+                    if txt or refs:
+                        doc["style"] = {"text": txt, "refs": refs}
+                    else:
+                        doc.pop("style", None)
+                    changed = True
                 if changed:
                     save(doc)
                 return self._send(200, {"ok": True,
                                         "typewriter": bool(doc.get("typewriter")),
-                                        "typesfx": bool(doc.get("typesfx"))})
+                                        "typesfx": bool(doc.get("typesfx")),
+                                        "style": doc.get("style")})
 
             if u.path == "/api/group":
                 doc = load(d["name"])
@@ -6480,6 +6553,19 @@ class H(BaseHTTPRequestHandler):
                     if not v and k in ("title", "noun", "member"):
                         return self._send(400, {"error": f"a {k} is needed"})
                     rec[k] = v
+                if "style" in d:
+                    # the shelf's picture style (CAST.md §5): words and refs
+                    # every card on the shelf paints under. Empty means none.
+                    st = d.get("style") or {}
+                    if not isinstance(st, dict):
+                        return self._send(400, {"error": "style is "
+                                                "{text, refs}"})
+                    txt = _clean(st.get("text"), 500)
+                    refs = ref_list(st.get("refs"))[:8]
+                    if txt or refs:
+                        rec["style"] = {"text": txt, "refs": refs}
+                    else:
+                        rec.pop("style", None)
                 save_series(recs)
                 return self._send(200, {"ok": True})
             if u.path == "/api/series/delete":
