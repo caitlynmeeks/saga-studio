@@ -50,6 +50,7 @@ import tarfile
 import tempfile
 import threading
 import time
+import unicodedata
 import wave
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -422,6 +423,15 @@ def strip_markdown(md):
 # built once should be usable everywhere. "Default" always exists and cannot
 # be deleted — every card falls back to it.
 PROFILES = ROOT / "profiles.json"
+# ── shelves ─────────────────────────────────────────────────────────────
+# A series is a playlist over the library: an ordered list of project names
+# kept entirely OUTSIDE the projects it names. Not one byte of a doc.json says
+# which shelf a story sits on, and that is the whole point. A story stands
+# alone, is shared alone, plays alone; the order it is read in belongs to the
+# shelf. Which is also what retires the numbers people put in titles — the
+# position in `order` IS the chapter number, so inserting an episode between
+# two others renames nothing.
+SERIES = ROOT / "series.json"
 # `engine` defaults to chatterbox so that adding a second engine changes nothing
 # until a profile is deliberately moved across — every wav already on disk keeps
 # its name and stays valid. `lang` and `speed` mean nothing to chatterbox and are
@@ -546,7 +556,17 @@ def library_counts():
 
     One pass and no hashing: the sidebar only needs to say how much a thing is
     carrying, which is cheap next to asking what is rendered."""
-    profs, clips, media = {}, {}, {}
+    profs, clips, media, home = {}, {}, {}, {}
+
+    def claim(name, rank, proj, title, of=""):
+        # Placed beats painted-against beats generated-and-not-kept, and an
+        # earlier project beats a later one on a tie. Rank first so that a
+        # picture two stories know is filed under the one that SHOWS it.
+        cur = home.get(name)
+        if cur is None or rank < cur["rank"]:
+            home[name] = {"rank": rank, "project": proj, "title": title,
+                          "of": of, "how": ("placed", "ref", "variant")[rank]}
+
     for d in sorted(ROOT.iterdir()):
         f = d / "doc.json"
         if not f.exists():
@@ -555,6 +575,7 @@ def library_counts():
             doc = json.loads(f.read_text())
         except (json.JSONDecodeError, OSError):
             continue
+        title = doc.get("title", d.name)
         for c in doc.get("chunks", []):
             if is_renderable(c):
                 k = c.get("profile", "Default")
@@ -563,7 +584,21 @@ def library_counts():
                 clips[c["clip"]] = clips.get(c["clip"], 0) + 1
             elif c.get("type") == "visual" and c.get("media"):
                 media[c["media"]] = media.get(c["media"], 0) + 1
-    return profs, clips, media
+            # Where a picture belongs is not something anyone should have to
+            # file: the documents already say it. A visual card SHOWS one,
+            # was painted AGAINST others, and remembers the ones it generated
+            # and did not keep.
+            if c.get("type") == "visual":
+                chosen = c.get("media") or ""
+                if chosen:
+                    claim(chosen, 0, d.name, title)
+                for g in c.get("gen") or []:
+                    g = re.sub(r"[^a-z0-9_-]", "", str(g or ""))
+                    if g and g != chosen:
+                        claim(g, 2, d.name, title, chosen)
+            for r in ref_list(c.get("ref")):
+                claim(r, 1, d.name, title)
+    return profs, clips, media, home
 
 
 def params_for(c, doc, profs=None):
@@ -662,26 +697,71 @@ SET_RE = re.compile(r"^(!?[a-z][a-z0-9_]{0,23}|[a-z][a-z0-9_]{0,23}[+\-=]\d{1,4}
 WHEN_RE = re.compile(r"^!?[a-z][a-z0-9_]{0,23}((==|!=|>=|<=|>|<)-?\d{1,4})?$")
 
 
+# A link is only ever followed by someone who is not the author, so the
+# scheme is a whitelist rather than a blacklist: two schemes, no spaces, no
+# quotes or angle brackets that could climb out of the attribute a player
+# writes it into.
+URL_RE = re.compile(r"^https?://[^\s<>\"']{1,400}$", re.I)
+
+
 def clean_when(v):
     w = re.sub(r"\s+", "", str(v or ""))
     return w if WHEN_RE.match(w) else ""
 
 
+def clean_url(v):
+    """A link an option may open, made safe.
+
+    http and https and nothing else. An option's URL is typed by an author but
+    CLICKED by a stranger, in an exported page that may be sitting on the open
+    web, so javascript:, data: and file: never get through this door — and
+    anything that is not a link at all comes back empty, which is exactly what
+    an ordinary option is."""
+    u = str(v or "").strip()
+    return u if URL_RE.match(u) else ""
+
+
+def clean_wait(v):
+    """Seconds a choice waits before deciding for itself. 0 waits forever,
+    which is what every choice card did before this existed, so a document
+    that has never heard of a timeout keeps its old behaviour by saying
+    nothing."""
+    try:
+        n = int(float(v))
+    except (TypeError, ValueError):
+        return 0
+    return max(0, min(600, n))
+
+
 def clean_options(v):
     """A choice card's options, made safe. `goto` is a tag, and gets exactly a
-    tag's sanitising; empty goto means the story ends there."""
+    tag's sanitising; empty goto means the story ends there.
+
+    `url` opens a page in the listener's own browser, and `dflt` marks the one
+    the card's clock takes when nobody answers. Only ONE option may be the
+    default: two of them is not a stalemate the players should have to break
+    at playback, so the first marked one wins here, once, and both players
+    then read the same document the same way."""
     out = []
+    marked = False
     for o in list(v or [])[:6]:
         if not isinstance(o, dict):
             continue
-        out.append({
+        row = {
             "label": str(o.get("label") or "")[:120],
             "goto": re.sub(r"[^a-z0-9_-]", "", str(o.get("goto") or "").lower())[:24],
             "set": [s for s in (re.sub(r"\s+", "", str(x))
                                 for x in list(o.get("set") or [])[:8])
                     if SET_RE.match(s)],
             "when": clean_when(o.get("when")),
-        })
+        }
+        u = clean_url(o.get("url"))
+        if u:
+            row["url"] = u
+        if o.get("dflt") and not marked:
+            row["dflt"] = True
+            marked = True
+        out.append(row)
     return out
 
 
@@ -752,6 +832,7 @@ def paste_card(src):
              "note": ""}
     elif kind == "choice":
         c = {"id": 0, "type": "choice", "auto": bool(src.get("auto")),
+             "wait": clean_wait(src.get("wait")),
              "options": clean_options(src.get("options")), "note": ""}
     elif kind == "group":
         c = {"id": 0, "type": "group",
@@ -886,9 +967,41 @@ def media_list():
 
 
 def media_of(doc):
-    """The media names a project's visual cards point at."""
+    """The media names a project's visual cards point at.
+
+    What the STORY needs, and no more: the web export shows exactly these,
+    so it must not be widened. A whole COPY of a project needs more than a
+    story does, and that is the next two functions' business."""
     return {c["media"] for c in doc["chunks"]
             if c.get("type") == "visual" and c.get("media")}
+
+
+def media_refs_of(doc):
+    """Pool images a card was painted AGAINST: its style references.
+
+    Nobody ever sees one, which is exactly why they went missing from the
+    archive. But a project that loses its references can no longer paint in
+    its own style, so a copy that drops them is not a copy of the project."""
+    out = set()
+    for c in doc["chunks"]:
+        out |= set(ref_list(c.get("ref")))
+    return out
+
+
+def media_history_of(doc):
+    """The variants a card generated and did not keep.
+
+    Packed when they are on disk and not mourned when they are not: a lost
+    rejected take is lost history, not a broken project. That is the whole
+    difference between this and the two above, and it is why the archive
+    reports a missing picture or reference and stays quiet about these."""
+    out = set()
+    for c in doc["chunks"]:
+        for g in c.get("gen") or []:
+            g = re.sub(r"[^a-z0-9_-]", "", str(g or ""))
+            if g:
+                out.add(g)
+    return out
 
 
 # Nanobanana — Gemini's image model, the studio's illustrator on demand. The
@@ -1456,6 +1569,126 @@ def projects():
     return out
 
 
+def series():
+    """Every shelf, by slug. Missing or unreadable reads as none, so a library
+    with no series.json behaves exactly as one did before shelves existed."""
+    if not SERIES.exists():
+        return {}
+    try:
+        s = json.loads(SERIES.read_text())
+    except (json.JSONDecodeError, OSError):
+        return {}
+    return s if isinstance(s, dict) else {}
+
+
+def save_series(s):
+    SERIES.write_text(json.dumps(s, indent=1))
+
+
+def series_slug(title, taken):
+    """Accents are folded rather than replaced, so "Cardon Poems" is what
+    `Cardón Poems` becomes and not `card-n-poems`. This slug is the shelf's
+    name on disk and, one day, its address on darkride, and a Canarian title
+    should not have to spell itself in ASCII to get a decent one."""
+    t = unicodedata.normalize("NFKD", title or "")
+    t = "".join(c for c in t if not unicodedata.combining(c))
+    base = re.sub(r"[^a-z0-9_-]+", "-", t.lower()).strip("-")[:60]
+    slug, k = (base or "series"), 2
+    while slug in taken:
+        slug, k = f"{base}-{k}", k + 1
+    return slug
+
+
+def _clean(v, cap):
+    return re.sub(r"[\x00-\x1f\x7f]", "", str(v or "")).strip()[:cap]
+
+
+def series_state():
+    """What the sidebar draws: every shelf, and the members that answer to a
+    real project, in the order the author put them.
+
+    A name no project answers to is passed OVER rather than struck out.
+    Deleting a story should not quietly rewrite a shelf, and a story restored
+    from a backup then walks straight back into the place it held. A story
+    sits on one shelf only, and only a hand-edited file could say otherwise —
+    but if one does, the claim is settled in the ORDER THE SHELVES WERE MADE,
+    never in the order they happen to be displayed. Sorting for display is a
+    view; it must not be able to move a story from one shelf to another, which
+    is exactly what deduping down the sorted list would have done the moment a
+    shelf was renamed."""
+    recs = series()
+    have = {d.name for d in ROOT.iterdir() if (d / "doc.json").exists()}
+    claim = {}
+    for slug in recs:
+        for n in recs[slug].get("order") or []:
+            claim.setdefault(n, slug)
+    out = []
+    for slug in sorted(recs, key=lambda k: str(recs[k].get("title") or k).lower()):
+        rec = recs[slug]
+        mem, seen = [], set()
+        for n in rec.get("order") or []:
+            if n in have and n not in seen and claim.get(n) == slug:
+                seen.add(n)
+                mem.append(n)
+        out.append({"slug": slug, "title": rec.get("title") or slug,
+                    # what this shelf calls itself and what it calls its parts:
+                    # Saga is a serial of episodes, the poems are a collection
+                    # of poems, and darkride's pages should say so
+                    "noun": rec.get("noun") or "series",
+                    "member": rec.get("member") or "episode",
+                    "blurb": rec.get("blurb") or "", "cover": rec.get("cover") or "",
+                    "order": mem, "created": rec.get("created") or ""})
+    return out
+
+
+def series_new(title):
+    t = _clean(title, 80)
+    if not t:
+        raise ValueError("a title is needed")
+    recs = series()
+    slug = series_slug(t, recs)
+    recs[slug] = {"title": t, "noun": "series", "member": "episode",
+                  "blurb": "", "cover": "", "order": [],
+                  "created": time.strftime("%Y-%m-%d %H:%M")}
+    save_series(recs)
+    return slug
+
+
+def series_assign(name, to, at=None):
+    """Move a story onto a shelf, to another place on the shelf it is already
+    on, or off shelves entirely (`to` None).
+
+    One shelf per story, so joining one is also leaving the other. `at` is an
+    index into the shelf WITHOUT this story: that is what makes dragging a
+    story one slot down land one slot down instead of back where it started.
+    Nothing here touches the story itself; a shelf move writes one file."""
+    recs = series()
+    if to is not None and to not in recs:
+        raise KeyError(to)
+    for rec in recs.values():
+        rec["order"] = [n for n in (rec.get("order") or []) if n != name]
+    if to is not None:
+        o = recs[to]["order"]
+        if at is None:
+            o.append(name)
+        else:
+            # `at` counts the shelf AS DRAWN, and what is drawn is the
+            # filtered view: a deleted story's name still holds its place in
+            # the file but is not on screen. Counting into the raw list would
+            # then land the story a slot or two from where it was pointed at,
+            # once for every ghost above it. So translate: find the shown
+            # story that is to sit below this one, and take its raw seat.
+            have = {d.name for d in ROOT.iterdir() if (d / "doc.json").exists()}
+            claim = {}
+            for slug in recs:
+                for n in recs[slug]["order"]:
+                    claim.setdefault(n, slug)
+            shown = [n for n in o if n in have and claim.get(n) == to]
+            at = max(0, min(int(at), len(shown)))
+            o.insert(len(o) if at == len(shown) else o.index(shown[at]), name)
+    save_series(recs)
+
+
 def import_md(title, md):
     text = normalise(strip_markdown(md))
     chunks = [{"id": i, "text": t, "params": {}, "note": ""}
@@ -1551,7 +1784,7 @@ def plan_export(names, with_audio):
             "missing_voices": [], "missing_clips": [], "missing_media": [],
             "missing_takes": [], "bytes": 0}
     vnames, pnames, cnames, tnames, audio = set(), set(), set(), set(), {}
-    mnames = set()
+    mnames, hnames = set(), set()
     for nm in names:
         try:
             doc = load(nm)
@@ -1565,7 +1798,10 @@ def plan_export(names, with_audio):
         vnames |= vs
         pnames |= ps
         cnames |= clips_of(doc)
-        mnames |= media_of(doc)
+        # what the cards show AND what they were painted against: both are
+        # needed for the project to open whole somewhere else
+        mnames |= media_of(doc) | media_refs_of(doc)
+        hnames |= media_history_of(doc)
         tnames |= takes_of(doc)
         rendered = 0
         for c in doc["chunks"]:
@@ -1614,6 +1850,17 @@ def plan_export(names, with_audio):
             plan["missing_media"].append(mn)
             continue
         plan["media"][mn] = {"file": f.name, "sha": sha256_file(f),
+                             "bytes": f.stat().st_size}
+        plan["bytes"] += f.stat().st_size
+    # The variant history rides along, quietly. A rejected take that is no
+    # longer on disk is skipped rather than reported: the archive is whole
+    # without it, and "missing" is a word that should mean something.
+    for hn in sorted(hnames - mnames):
+        try:
+            f = media_file(hn)
+        except FileNotFoundError:
+            continue
+        plan["media"][hn] = {"file": f.name, "sha": sha256_file(f),
                              "bytes": f.stat().st_size}
         plan["bytes"] += f.stat().st_size
     for tn in sorted(tnames):
@@ -1860,6 +2107,15 @@ def import_archive(path, mode="skip"):
                     c["clip"] = cmap.get(c["clip"], c["clip"])
                 if c.get("type") == "visual" and c.get("media"):
                     c["media"] = mmap.get(c["media"], c["media"])
+                # A renamed picture takes its history and its style
+                # references with it. Repointing only the visible one left a
+                # card whose variant menu and whose reference chips named
+                # files that had arrived under other names.
+                if c.get("gen"):
+                    c["gen"] = [mmap.get(g, g) for g in c["gen"]]
+                if c.get("ref"):
+                    rs = [mmap.get(r, r) for r in ref_list(c.get("ref"))]
+                    c["ref"] = rs if isinstance(c["ref"], list) else (rs[0] if rs else "")
                 # Only write the key back if it was there or the name actually
                 # moved. Adding an explicit "Default" to a card that never had
                 # one would mean a plain restore did not return the document it
@@ -3496,7 +3752,8 @@ def _export_chunk(c):
         out["text"] = c.get("text") or ""
         out["secs"] = float(c.get("secs", 3.0))
         out["fade"] = (list(c.get("fade") or []) + [0.6, 0.6])[:2]
-    for k in ("tags", "when", "auto", "mute", "media", "mediakind", "sub", "chain"):
+    for k in ("tags", "when", "auto", "wait", "mute", "media", "mediakind",
+              "sub", "chain"):
         if c.get(k):
             out[k] = c[k]
     for k in ("tw", "twsfx"):           # 0 is a real word here: explicit off
@@ -4166,9 +4423,12 @@ class H(BaseHTTPRequestHandler):
             return self._send(200, (HERE / "player.js").read_bytes(),
                               "text/javascript; charset=utf-8")
         if u.path == "/api/state":
-            pcounts, ccounts, mcounts = library_counts()
+            pcounts, ccounts, mcounts, mhome = library_counts()
             return self._send(200, {
                 "projects": projects(),
+                # the shelves, and who is on them — the sidebar draws the
+                # tree from this and calls everything else Unfiled
+                "series": series_state(),
                 # with durations: the editor shows them, and a reference clip
                 # past ten seconds is worth seeing, since chatterbox reads only
                 # the first ten and the rest has never been heard
@@ -4184,6 +4444,9 @@ class H(BaseHTTPRequestHandler):
                 "media": media_list(),
                 "profiles": profiles(), "profile_counts": pcounts,
                 "clip_counts": ccounts, "media_counts": mcounts,
+                # which story knows each picture, and how — the visuals pool
+                # draws its folders from this and files nothing by hand
+                "media_home": mhome,
                 "defaults": DEFAULTS, "bake": _bake,
                 "engines": list(ENGINES), "omnivoice": ov_available(),
                 "chatterbox": cb_available(),
@@ -4304,6 +4567,7 @@ class H(BaseHTTPRequestHandler):
                     c["ready"] = True          # nothing to render, ever
                     c.setdefault("options", [])
                     c.setdefault("auto", False)
+                    c.setdefault("wait", 0)
                 else:              # silence and titles have nothing to render
                     c["ready"] = True
             return self._send(200, doc)
@@ -4946,7 +5210,8 @@ class H(BaseHTTPRequestHandler):
         # impact scans every project in the library to count cards, so it is
         # slow and read-only — exactly the shape that must not hold the lock
         lock = None if u.path in ("/api/chat", "/api/assemble", "/api/book_preview",
-                                  "/api/reveal", "/api/profile/impact",
+                                  "/api/reveal", "/api/open_link",
+                                  "/api/profile/impact",
                                   # slow and read-only, the same shape as
                                   # assemble — they must not block typing
                                   # (share touches only share.json and out/)
@@ -5020,6 +5285,8 @@ class H(BaseHTTPRequestHandler):
                             c["options"] = clean_options(d["options"])
                         if "auto" in d:
                             c["auto"] = bool(d["auto"])
+                        if "wait" in d:    # 0 = wait for the listener forever
+                            c["wait"] = clean_wait(d["wait"])
                         if "profile" in d:
                             c["profile"] = d["profile"]
                         if "mute" in d:
@@ -5144,7 +5411,7 @@ class H(BaseHTTPRequestHandler):
                 elif kind == "choice":
                     # two blank options, because a choice is usually a fork —
                     # and a chooser with one button is a button
-                    c = {"id": 0, "type": "choice", "auto": False,
+                    c = {"id": 0, "type": "choice", "auto": False, "wait": 0,
                          "options": [{"label": "", "goto": "", "set": [], "when": ""},
                                      {"label": "", "goto": "", "set": [], "when": ""}],
                          "note": ""}
@@ -5688,6 +5955,59 @@ class H(BaseHTTPRequestHandler):
                                         "left": len(stack)})
 
 
+            if u.path == "/api/voice/from_card":
+                # A rendered card becomes a reference clip, and a profile to
+                # wear it. The point is the voiced card: you drive it with one
+                # performance and a character's timbre, and what comes out is
+                # a voice that never existed before — an accent that is not
+                # yours in a mouth that is. Until now the only way to keep it
+                # was to find the wav in the cache by hand.
+                doc = load(d.get("name") or "")
+                if doc is None:
+                    return self._send(404, {"error": "no such project"})
+                try:
+                    cid = int(d.get("id"))
+                except (TypeError, ValueError):
+                    return self._send(400, {"error": "which card?"})
+                c = next((x for x in doc["chunks"] if x["id"] == cid), None)
+                if c is None or not is_renderable(c):
+                    return self._send(400, {"error": "that card makes no audio"})
+                src = AUDIO / f"{chunk_hash(c, doc)}.wav"
+                if not src.exists():
+                    return self._send(400, {"error": "render this card first — "
+                                            "there is no audio to clone yet"})
+                pname = _clean(d.get("profile"), 60)
+                if not pname:
+                    return self._send(400, {"error": "a name is needed"})
+                profs = profiles()
+                if pname in profs:
+                    return self._send(400, {"error": f"there is already a "
+                                            f"profile called {pname!r}"})
+                stem = re.sub(r"[^a-z0-9_-]+", "-", pname.lower()).strip("-")[:40] or "voice"
+                VOICES.mkdir(parents=True, exist_ok=True)
+                # Never overwrite a voice: its NAME is part of every chunk hash
+                # that used it, so putting different audio behind one would
+                # change what already-rendered cards mean without changing a
+                # single hash. Same rule as import and upload.
+                taken = {q.stem for q in VOICES.iterdir() if q.is_file()}
+                vname = stem if stem not in taken else _free_name(taken, stem, "new")
+                shutil.copy2(src, VOICES / f"{vname}.wav")
+                # The new profile starts as the card's own, so the knobs that
+                # shaped it carry over; only the clip changes. Kokoro speaks
+                # presets rather than clips, so a card of that kind hands the
+                # new profile to the engine that can actually use one.
+                base = dict(profs.get(c.get("profile", "Default"))
+                            or profs.get("Default") or BASE_PROFILE)
+                base.pop("fx", None)
+                base["voices"] = [vname]
+                base["active"] = 0
+                if base.get("engine") == "kokoro":
+                    base["engine"] = "chatterbox"
+                profs[pname] = base
+                save_profiles(profs)
+                return self._send(200, {"ok": True, "profile": pname,
+                                        "voice": vname, "engine": base["engine"],
+                                        "secs": clip_secs(VOICES / f"{vname}.wav")})
             if u.path == "/api/profile/delete":
                 nm = d.get("profile")
                 if nm == "Default":
@@ -5865,6 +6185,21 @@ class H(BaseHTTPRequestHandler):
                 subprocess.run([OPEN_CMD, str(target)], check=False)
                 return self._send(200, {"ok": True, "path": str(target),
                                         "assembled": out.is_dir()})
+            if u.path == "/api/open_link":
+                # A choice option's link, opened in the author's own browser.
+                # The stage asks the server rather than calling window.open
+                # itself: the popped-out stage is a child window of the
+                # Electron shell, and a child does not inherit the handler
+                # that turns window.open into "the real browser" — so the one
+                # path that works from every stage is this one. The exported
+                # player is a web page with no server behind it and opens its
+                # own links; both go through clean_url first, so http and
+                # https are the only schemes either can reach.
+                link = clean_url(d.get("url"))
+                if not link:
+                    return self._send(400, {"error": "that is not an http link"})
+                subprocess.run([OPEN_CMD, link], check=False)
+                return self._send(200, {"ok": True})
             if u.path == "/api/rename":
                 # The title only. `name` is the folder and every path derived
                 # from it, and renaming that would move a project's audio,
@@ -5876,6 +6211,47 @@ class H(BaseHTTPRequestHandler):
                 doc["title"] = t[:120]
                 save(doc)
                 return self._send(200, {"ok": True, "title": doc["title"]})
+
+            # ── shelves ── a series is an ordered list of project names and
+            # nothing else. Every verb here writes series.json alone: no
+            # document is opened, no card is touched, no hash can move. That
+            # is deliberate, and it is what makes a shelf safe to rearrange
+            # while the story on it is open in the editor.
+            if u.path == "/api/series/new":
+                try:
+                    slug = series_new(d.get("title"))
+                except ValueError as ex:
+                    return self._send(400, {"error": str(ex)})
+                return self._send(200, {"ok": True, "slug": slug})
+            if u.path == "/api/series/edit":
+                recs = series()
+                rec = recs.get(d.get("slug") or "")
+                if rec is None:
+                    return self._send(404, {"error": "no such series"})
+                for k, cap in (("title", 80), ("noun", 24), ("member", 24),
+                               ("blurb", 500), ("cover", 120)):
+                    if k not in d:
+                        continue
+                    v = _clean(d.get(k), cap)
+                    if not v and k in ("title", "noun", "member"):
+                        return self._send(400, {"error": f"a {k} is needed"})
+                    rec[k] = v
+                save_series(recs)
+                return self._send(200, {"ok": True})
+            if u.path == "/api/series/delete":
+                # the shelf goes, the stories do not. Nothing on disk outside
+                # series.json is even opened.
+                recs = series()
+                if recs.pop(d.get("slug") or "", None) is None:
+                    return self._send(404, {"error": "no such series"})
+                save_series(recs)
+                return self._send(200, {"ok": True})
+            if u.path == "/api/series/assign":
+                try:
+                    series_assign(d["name"], d.get("to") or None, d.get("at"))
+                except KeyError:
+                    return self._send(404, {"error": "no such series"})
+                return self._send(200, {"ok": True})
 
             # ── drafts ── the discuss agent's sandbox. A draft is an
             # ordinary project with two extra fields: `draft: true`, which is

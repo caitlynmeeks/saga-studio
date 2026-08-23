@@ -46,6 +46,13 @@ the story rather than trusting remembered ids.**
   `["brave", "!met_gertie", "coins+1", "coins=5"]`), and `when` (offered
   only while it holds). `auto: true` takes the first passing option
   silently — if/else and goto in one card.
+  An option may also carry `url` — an http/https page it opens in the
+  listener's own browser, marked ↗ on the button so nobody leaves by
+  surprise; a `url` with no `goto` leaves the chooser standing rather than
+  ending the story, which is what a sponsor link or a footnote wants. The
+  card's `wait` is how many seconds it asks for before deciding itself, and
+  the option marked `dflt: true` is what the silence takes (0 = wait
+  forever, which is the old behaviour and still the default).
 - **audio** — music or an effect: `clip`, `mode` (`full` = play it all,
   `after` = next card after N seconds with the rest under the narration),
   `gain`, `fade` as percentages.
