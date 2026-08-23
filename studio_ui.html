@@ -285,6 +285,10 @@ body[data-mode=cast] #draftbar,body[data-mode=cast] #vfbar{display:none}
 .plate.key{border-color:#4a3d22}
 .plate.dragging{opacity:.4}
 .plate.hot{outline:2px solid var(--green);outline-offset:-2px}
+/* a candidate: painted or unlinked, waiting to be chosen — dashed because
+   it is not canon, amber-capped so the row reads at a glance */
+.plate.cand{border-style:dashed;cursor:pointer}
+.plate.cand .pcap{color:var(--amber)}
 #castdrop{border:1.5px dashed var(--line);border-radius:8px;padding:18px 10px;
   text-align:center;color:var(--faint);cursor:pointer;font-size:12px;
   margin:16px 0 6px}
@@ -1525,6 +1529,15 @@ function profEditor(n){
 
     <div id="pimpact" class="pimpact"></div>
 
+    ${castOfProfile(n)
+      ?`<div class="phelp">in the cast as
+         <button class="tiny" onclick="openBoard('${castOfProfile(n)}')"
+           title="open the board — plates, brief, looks">@${castOfProfile(n)}</button></div>`
+      :`<div class="pact">
+         <button onclick="castFromProfile()"
+           title="a good number of these profiles are characters that exist nowhere else in the app — this makes a cast member already linked to this voice, its look to be filled in on the board">Make a Cast Member from this Voice</button>
+        </div>`}
+
     <div class="pact main">
       <button id="psave" class="pri" onclick="saveProf()" disabled>Save Changes</button>
       <button id="pdisc" onclick="discardProf()" disabled>Discard</button>
@@ -2740,6 +2753,8 @@ function mediaMenu(e,i){
       run:()=>editExternal(mk,m.name)}]:[]),
     {label:'Rename…', run:()=>{ openCtx(e,[]);
        ctxAsk(m.name,'media name','rename',t=>renameMedia(m.name,t)); }},
+    ...(m.kind!=='video'?[{label:'→ Make This a Reference…',
+       run:()=>promotePicker(e,m.name)}]:[]),
     '-',
     // no delete, as clips: undo can resurrect a card that points at it
     {label:used?`used by ${used} card${used===1?'':'s'}`:'not used by any card',disabled:true},
@@ -2826,6 +2841,15 @@ $('mediafile').onchange=async e=>{
 let CASTSEL=null;                 // whose board the deck is wearing
 let DRAGPLATE=null;               // a plate mid-reorder, so file drops stand aside
 let DRAGCAST=null;                // a member mid-drag towards a visual card
+let PAINTTGT='';                  // the plate the board's Paint varies, '' = the key
+let BOARDPAINTING=false;          // one candidate at a time; the button says so
+// §7d: prompts that paint well, kept as buttons because the phrasing matters
+// and should not have to be remembered. [label, file stem, the prompt]
+const CASTPRESETS=[
+  ['turnaround','sheet','the same character, model sheet, front / three-quarter / profile / back, neutral grey background, consistent height and proportion, no text'],
+  ['expressions','expressions','the same character, expression sheet: a grid of six faces — joy, anger, fear, surprise, weariness, resolve — neutral grey background, consistent proportion, no text'],
+  ['three angles','angles','the same character in this outfit, from three angles: front, three-quarter and back, neutral grey background, consistent height and proportion, no text'],
+];
 let CFOLD={};                     // folded kind groups, per machine
 try{ CFOLD=JSON.parse(localStorage.getItem('saga.cfold')||'{}'); }catch(e){}
 function foldCast(k){
@@ -2977,6 +3001,7 @@ function castMenu(e,slug){
       ctxAsk(m.title||slug,'what a human calls it','rename',
         t=>castApi('/api/cast/edit',{slug,title:t})); }},
     {label:'Show its Folder', run:()=>castApi('/api/cast/reveal',{slug},true)},
+    {label:'Duplicate the Member', run:()=>dupMember(slug)},
     '-',
     {label:'Remove from the Cast…', danger:true, run:()=>removeMember(slug)},
   ]);
@@ -3012,6 +3037,10 @@ async function createMember(){
 
 // ── the board ── it swaps in for the deck; body.dataset.mode carries it
 function openBoard(slug){
+  if(CASTSEL!==slug){         // another member is another painting session
+    PAINTTGT='';
+    const cp=$('cpaint'); if(cp)cp.value='';
+  }
   CASTSEL=slug;
   document.body.dataset.mode='cast';
   if(document.body.dataset.side!=='cast')setSide('cast');
@@ -3035,6 +3064,10 @@ function renderBoard(force){
     const el=document.activeElement;
     if(el&&bd.contains(el)&&/^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName))return;
   }
+  if(PAINTTGT&&!(m.plates||{})[PAINTTGT])PAINTTGT='';
+  // a rebuild must not eat a half-typed paint prompt (a fresh board never
+  // inherits one: openBoard clears the box on a member switch)
+  const oldPrompt=($('cpaint')||{}).value||'';
   $('castbar').innerHTML=`<span>✎ ${esc(m.title||CASTSEL)} · ${esc(m.kind||'member')}</span>
     <span class="mut" style="font-size:11px">@${CASTSEL}</span>
     <span style="flex:1"></span>
@@ -3087,19 +3120,53 @@ function renderBoard(force){
       // one unnamed group is just "the plates" — a header would be noise
       if(!(looks.size===1&&!lk))
         html+=`<div class="lookbar"><b>${lk?esc(lk):'<span class="mut" style="font-weight:400">no look named</span>'}</b>
-          <span class="mut" style="font-size:11px">${ps.length}</span></div>`;
+          <span class="mut" style="font-size:11px">${ps.length}</span>
+          <span style="flex:1"></span>
+          <button class="tiny lookdup" data-look="${aq(lk)}"
+            title="duplicate this look — every plate copied into a new look, each pointing at the picture it came from, ready to repaint. One gesture for “she becomes a cosmonaut”.">⧉ dup</button></div>`;
       else html+='<div style="margin-top:14px"></div>';
       html+='<div class="plategrid">'+ps.map(([slot,p])=>plateTile(slot,p,m.key===slot)).join('')+'</div>';
     }
   }
+  // ── candidates ── painted or unlinked, not canon until accepted (§7c)
+  const cand=(m.candidates||[]).filter(f=>/^[a-z0-9_.-]{1,80}$/.test(f)&&!f.includes('..'));
+  if(cand.length){
+    html+=`<div class="lookbar"><b style="color:var(--amber)">candidates</b>
+      <span class="mut" style="font-size:11px">${cand.length} waiting — click one to accept it into a slot, or drop it from the row</span></div>
+      <div class="plategrid">`+cand.map(f=>`<div class="plate cand" data-file="${aq(f)}"
+        title="a candidate — click to choose what becomes of it">
+        <img src="/api/plate?slug=${CASTSEL}&f=${encodeURIComponent(f)}" loading="lazy" draggable="false">
+        <div class="pcap"><span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(f.replace(/\.[a-z0-9]+$/,''))}</span></div>
+      </div>`).join('')+'</div>';
+  }
+  // ── painting ── candidates only, assembled exactly as a card's paint is
+  const nb=!!STATE.nanobanana, some=!!Object.keys(m.plates||{}).length;
+  html+=`<div style="display:flex;gap:6px;margin-top:16px;align-items:start">
+    <textarea id="cpaint" rows="2" style="flex:1;resize:vertical;min-height:38px"
+      placeholder="${nb?'paint a candidate — the '+(some?(PAINTTGT?PAINTTGT:'key')+' plate and the brief ride':'brief rides')+' along; every press is a few cents and ~15s'
+        :'painting needs an image provider — a Gemini key or Draw Things, in ⚙ Settings'}"
+      onkeydown="if(event.key==='Enter'&&(event.metaKey||event.ctrlKey))boardPaint(this.value,'candidate')"></textarea>
+    <button id="cpb" class="pri" ${nb&&!BOARDPAINTING?'':'disabled'}
+      onclick="boardPaint($('cpaint').value,'candidate')">${BOARDPAINTING?'painting…':'Paint'}</button>
+  </div>
+  <div style="display:flex;gap:5px;margin-top:5px;align-items:center;flex-wrap:wrap">
+    ${PAINTTGT?`<button class="tiny" onclick="PAINTTGT='';renderBoard(true)"
+      title="painting against @${CASTSEL}/${PAINTTGT} — click to go back to painting against the key">against: ${esc(PAINTTGT)} ✕</button>`:''}
+    ${CASTPRESETS.map((p,i)=>`<button class="tiny" ${nb&&some&&!BOARDPAINTING?'':'disabled'}
+      onclick="boardPaint(CASTPRESETS[${i}][2],CASTPRESETS[${i}][1])"
+      title="${aq(p[2])}">${esc(p[0])}</button>`).join('')}
+    <span class="mut" style="font-size:11px">${some?'what it paints lands above as a candidate':'no plates yet — a first painting works from the brief alone'}</span>
+  </div>`;
   html+=`<div id="castdrop">drop pictures here to add plates — or click to choose</div>
     <div class="mut" style="font-size:11px;margin-bottom:10px">right-click a
-      plate for its slot name, look, view and the key ★ — drag to reorder.
-      Removing one unlinks it; the file stays in the folder.</div>
+      plate for its slot name, look, view, the key ★ and paint-against —
+      drag to reorder. Removing one unlinks it into the candidates; a pool
+      picture dragged here is copied in as a plate, the pool copy stays.</div>
     <input type="file" id="platefile" hidden multiple
       accept="image/*,.png,.jpg,.jpeg,.webp,.gif"></div>`;
   bd.innerHTML=html;
   wireBoard();
+  const cp=$('cpaint'); if(cp&&oldPrompt&&!cp.value)cp.value=oldPrompt;
 }
 function plateTile(slot,p,key){
   return `<div class="plate ${key?'key':''}" draggable="true" data-slot="${aq(slot)}"
@@ -3113,7 +3180,14 @@ function plateTile(slot,p,key){
 }
 function wireBoard(){
   const bd=$('castboard');
-  bd.querySelectorAll('.plate').forEach(el=>{
+  bd.querySelectorAll('.plate.cand').forEach(el=>{
+    const open=e=>candMenu(e,el.dataset.file);
+    el.addEventListener('click',open);
+    el.addEventListener('contextmenu',open);
+  });
+  bd.querySelectorAll('.lookdup').forEach(el=>
+    el.addEventListener('click',e=>dupLook(e,el.dataset.look)));
+  bd.querySelectorAll('.plate:not(.cand)').forEach(el=>{
     el.addEventListener('dragstart',e=>{
       DRAGPLATE=el.dataset.slot; el.classList.add('dragging');
       e.dataTransfer.effectAllowed='move';
@@ -3140,11 +3214,21 @@ function wireBoard(){
     e.preventDefault(); dz.classList.add('hot'); }));
   ['dragleave','drop'].forEach(k=>dz.addEventListener(k,e=>{
     e.preventDefault(); dz.classList.remove('hot'); }));
-  dz.addEventListener('drop',e=>{ if(!DRAGPLATE)uploadPlates(e.dataTransfer.files); });
+  dz.addEventListener('drop',e=>{ if(!DRAGPLATE)boardDrop(e); });
   $('platefile').onchange=e=>{ uploadPlates(e.target.files); e.target.value=''; };
-  // the whole board takes a Finder drop, the gesture #drop already teaches
+  // the whole board takes a drop, the gesture #drop already teaches: files
+  // from Finder become plates; a picture dragged over from the POOL is the
+  // promotion gesture (§6) with the member already answered
   bd.ondragover=e=>{ if(!DRAGPLATE)e.preventDefault(); };
-  bd.ondrop=e=>{ if(!DRAGPLATE){ e.preventDefault(); uploadPlates(e.dataTransfer.files); } };
+  bd.ondrop=e=>{ if(!DRAGPLATE){ e.preventDefault(); boardDrop(e); } };
+}
+function boardDrop(e){
+  if(DRAGMEDIA){
+    const n=DRAGMEDIA; DRAGMEDIA=null; document.body.dataset.dropclip='';
+    promoteMedia({media:n,slug:CASTSEL});
+    return;
+  }
+  uploadPlates(e.dataTransfer.files);
 }
 async function setVoiceLink(engine,prof){
   const m=(STATE.cast||{})[CASTSEL]; if(!m)return;
@@ -3178,6 +3262,11 @@ function plateMenu(e,slot){
     ...(p.look||p.view?[{label:'Clear the Look and View',
       run:()=>castApi('/api/cast/plate/edit',{slug:CASTSEL,plate:slot,look:'',view:''})}]:[]),
     '-',
+    {label:'Paint a Variant of This One…', run:()=>{
+      PAINTTGT=slot; renderBoard(true);
+      const cp=$('cpaint'); if(cp)cp.focus();
+      $('status').textContent=`painting against @${CASTSEL}/${slot} — write the prompt and press Paint`;
+    }},
     {label:'Open in your Viewer', run:()=>castApi('/api/cast/open',{slug:CASTSEL,plate:slot},true)},
     '-',
     {label:'Remove from its Slot', danger:true,
@@ -3204,6 +3293,136 @@ async function uploadPlates(list){
   await refresh(); renderBoard(true);
   $('status').innerHTML=`<span class="ok">${done} plate${done===1?'':'s'} filed</span>`+
     ' — right-click one to name its slot, look and view';
+}
+
+// ── candidates, painting and promotion ── step 3 of CAST.md §10: the
+// gestures that make the registry worth having filled in.
+function candMenu(e,f){
+  const m=(STATE.cast||{})[CASTSEL]; if(!m||!(m.candidates||[]).includes(f))return;
+  const sug=f.replace(/\.[a-z0-9]+$/,'').replace(/-new(-\d+)?$/,'');
+  openCtx(e,[
+    {label:'Accept into a Slot…', run:()=>{ openCtx(e,[]);
+      ctxAsk(sug,'slot name — sheet, 3q, angry…','accept',
+        t=>castApi('/api/cast/accept',{slug:CASTSEL,file:f,plate:t})); }},
+    {label:'Accept as the Key Plate…', run:()=>{ openCtx(e,[]);
+      ctxAsk(sug,'slot name','accept ★',
+        t=>castApi('/api/cast/accept',{slug:CASTSEL,file:f,plate:t,key:true})); }},
+    '-',
+    {label:'Open in your Viewer',
+     run:()=>castApi('/api/cast/open',{slug:CASTSEL,file:f},true)},
+    '-',
+    // the row forgets it; the file stays in the folder, as everywhere
+    {label:'Drop from the Row', danger:true,
+     run:()=>castApi('/api/cast/candidate/drop',{slug:CASTSEL,file:f})},
+  ]);
+}
+async function boardPaint(prompt,stem){
+  if(!CASTSEL||BOARDPAINTING)return;
+  const slug=CASTSEL;
+  prompt=(prompt||'').trim();
+  if(!prompt){
+    $('status').textContent='write the prompt first — Paint paints what the prompt says';
+    const cp=$('cpaint'); if(cp)cp.focus();
+    return;
+  }
+  BOARDPAINTING=true;
+  const b=$('cpb'); if(b){ b.disabled=true; b.textContent='painting…'; }
+  $('status').textContent='painting a candidate — about 15 seconds';
+  let r; try{ r=await api('/api/cast/paint',{slug,prompt,plate:PAINTTGT,stem:stem||'candidate'}); }
+  catch(ex){ r={error:String(ex)}; }
+  BOARDPAINTING=false;
+  if(r.error){
+    if(CASTSEL===slug)renderBoard(true);
+    return void($('status').innerHTML=`<span class="warn">${esc(r.error)}</span>`);
+  }
+  const cp=$('cpaint'); if(cp)cp.value='';
+  await refresh();
+  if(CASTSEL===slug)renderBoard(true);
+  $('status').innerHTML=`<span class="ok">“${esc(r.file)}” painted</span> — it waits in the candidates row; accept it into a slot or drop it`;
+}
+async function dupLook(e,look){
+  if(!CASTSEL)return;
+  openCtx(e,[]);
+  ctxAsk('','the new look — spacesuit red, winter coat…','copy',async to=>{
+    const r=await castApi('/api/cast/dup_look',{slug:CASTSEL,look,to});
+    if(r)$('status').innerHTML=`<span class="ok">${r.plates.length} plate${r.plates.length===1?'':'s'} copied into “${esc(to)}”</span>`+
+      ' — each still shows the original; repaint one against it and accept the result into its slot';
+  });
+}
+async function dupMember(slug){
+  const r=await castApi('/api/cast/dup_member',{slug});
+  if(r){ openBoard(r.slug);
+    $('status').innerHTML=`<span class="ok">@${r.slug}</span> — the whole member, brief and voices included`; }
+}
+async function promoteMedia(p){
+  const r=await castApi('/api/cast/promote',p);
+  if(!r)return null;
+  $('status').innerHTML=`<span class="ok">filed as @${r.slug}/${r.plate}</span>`+
+    ' — the pool copy stays; right-click the plate to rename or label it';
+  return r;
+}
+// §6's dialog, in the CTX shell: which member (existing or new), then the
+// slot and whether it is the key. Two steps, one popover.
+function promotePicker(e,name){
+  openCtx(e,[]); if(!CTX)return;
+  CTX.classList.add('refpick');
+  const sug=name.replace(/-new(-\d+)?$/,'').slice(0,40);
+  const ask=slug=>{
+    CTX.innerHTML=`<div class="ctxask" style="flex-direction:column;align-items:stretch">
+      <div class="mut" style="font-size:11px">“${esc(name)}” → @${slug} — name its slot</div>
+      <input id="pslot" value="${aq(sug)}" placeholder="slot name — 3q, sheet, angry…">
+      <label class="mut" style="font-size:11px"><input type="checkbox" id="pkey"> make it the key plate</label>
+      <button class="pri">file it</button></div>`;
+    const inp=$('pslot'), btn=CTX.querySelector('button.pri');
+    const go=()=>{ const v=inp.value.trim(); if(!v)return inp.focus();
+      closeCtx();
+      promoteMedia({media:name,slug,plate:v,key:$('pkey')&&$('pkey').checked}); };
+    btn.onclick=go;
+    inp.onkeydown=ev=>{ ev.stopPropagation();
+      if(ev.key==='Enter'){ ev.preventDefault(); go(); }
+      if(ev.key==='Escape'){ ev.preventDefault(); closeCtx(); } };
+    inp.focus(); inp.select();
+  };
+  let html=`<div class="rphead" data-find="">“${esc(name)}” becomes a reference of…</div>`;
+  html+=castRows().map(m=>`<div class="rcell" data-slug="${m.slug}">
+    ${castThumb(m)}<span>${esc(m.title||m.slug)} · ${esc(m.kind||'member')}</span></div>`).join('');
+  html+=`<div class="rcell" data-new="1">
+    <span style="width:44px;text-align:center;flex:none">＋</span><span>someone new…</span></div>`;
+  CTX.innerHTML=html;
+  CTX.style.left=Math.max(6,Math.min(e.clientX,innerWidth-CTX.offsetWidth-8))+'px';
+  CTX.style.top=Math.max(6,Math.min(e.clientY,innerHeight-CTX.offsetHeight-8))+'px';
+  CTX.addEventListener('click',ev=>{
+    const r=ev.target.closest('.rcell'); if(!r)return;
+    if(r.dataset.new){
+      CTX.classList.remove('refpick');
+      ctxAsk('','who is this? their name — the rest is set on the board','create',
+        async t=>{
+          const got=await castApi('/api/cast/promote',
+            {media:name,new_title:t,scope:castShelf()});
+          if(got)$('status').innerHTML=`<span class="ok">@${got.slug} joins the cast</span>`+
+            ` — “${esc(name)}” filed as its ${esc(got.plate)} plate and its key`;
+        });
+      return;
+    }
+    ask(r.dataset.slug);
+  });
+}
+// door three of §7e: a voice profile that is already a character becomes one
+function castOfProfile(n){
+  for(const [slug,m] of Object.entries(STATE.cast||{}))
+    if(Object.values(m.voice||{}).includes(n))return slug;
+  return '';
+}
+async function castFromProfile(){
+  const n=EDITING;                 // the profile open in the editor
+  const prof=n&&(STATE.profiles||{})[n]; if(!prof)return;
+  const r=await castApi('/api/cast/new',{title:n,kind:'character',scope:castShelf()});
+  if(!r)return;
+  await castApi('/api/cast/edit',{slug:r.slug,
+    voice:{[prof.engine||'chatterbox']:n}});
+  openBoard(r.slug);
+  $('status').innerHTML=`<span class="ok">@${r.slug} joins the cast</span>`+
+    ' — linked to this voice; give it a brief and a first plate';
 }
 
 // ── publish ───────────────────────────────────────────────
@@ -4440,6 +4659,9 @@ async function genMenu(e,id){
     run:()=>setCard(id,{media:n},true)}));
   items.push('-');
   items.push({label:'paint another variant',run:()=>genImage(id)});
+  if(c.media)
+    items.push({label:`→ make “${c.media}” a reference…`,
+      run:()=>promotePicker(e,c.media)});
   if(c.media&&gen.includes(c.media)&&gen.length>1)
     items.push({label:`✕ drop “${c.media}” — it's off`,danger:true,
       run:()=>dropVariant(id)});

@@ -1077,6 +1077,74 @@ def _labelled_prompt(prompt, members):
     return "\n".join(lines) + f"\n\nShot: {prompt}"
 
 
+def _paint_image(text, aspect, refs):
+    """One painting, whoever holds the brush: `refs` are (path, label) pairs
+    already resolved upstream. Returns (bytes, ext)."""
+    st = settings()["image"]
+    if st["provider"] == "drawthings":
+        return _paint_drawthings(text, aspect, refs, st["url"])
+    return _paint_nanobanana(text, aspect, refs, st["key"] or gemini_key())
+
+
+def cast_paint(slug, prompt, plate="", stem=""):
+    """Paint inside the board (CAST.md §7d): the member's own plates as
+    references — the selected plate first, so a local painter's canvas is
+    the one being varied, then the key — and its brief as words, assembled
+    exactly as a card's painting is. Anything less and the drift simply
+    moves up a level: a turnaround that does not match the portrait it came
+    from. What comes back lands as a CANDIDATE in the member's folder,
+    never a plate: canon is chosen, not accumulated (§7c). A member with no
+    plates yet paints from the brief alone — that is how one is
+    bootstrapped from nothing. Returns the candidate's file name."""
+    if not prompt.strip():
+        raise ValueError("an empty prompt paints nothing")
+    m = cast().get(slug)
+    if m is None:
+        raise ValueError("no such cast member")
+    plates = m.get("plates") or {}
+    if plate and plate not in plates:
+        raise ValueError(f'no plate "{plate}" to paint against')
+    refs = []
+    if plate:
+        refs.append(f"@{slug}/{plate}")
+    if plates:
+        k = m.get("key") or next(iter(plates))
+        if k != plate:
+            refs.append(f"@{slug}/{k}")
+    rr = [resolve_ref(r) for r in refs]
+    text = _labelled_prompt(prompt, [m])
+    img, ext = _paint_image(text, "16:9", rr)
+    stem = (re.sub(r"[^a-z0-9_-]+", "-", (stem or "candidate").lower())
+            .strip("-")[:40] or "candidate")
+    folder = CAST / slug
+    folder.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=ROOT, prefix=".plate-", suffix=ext)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(img)
+        w = webp_still(Path(tmp))
+        if w:
+            Path(tmp).unlink(missing_ok=True)
+            tmp, ext = str(w), ".webp"
+        # the slow painting ran lockless; only this read-modify-write of the
+        # registry takes the lock, like any other json touch
+        with _docmut:
+            reg = cast()
+            m = reg.get(slug)
+            if m is None:
+                raise ValueError("the member went away mid-painting")
+            taken = {p.stem for p in folder.iterdir() if p.is_file()}
+            fname = _free_name(taken, stem, "new") + ext
+            dest = folder / fname
+            os.replace(tmp, dest)
+            os.chmod(dest, 0o644)
+            m.setdefault("candidates", []).append(fname)
+            save_cast(reg)
+    finally:
+        Path(tmp).unlink(missing_ok=True)
+    return fname
+
+
 def generate_media(prompt, stem="", aspect="", ref=""):
     """Ask the chosen illustrator for a picture and file it in the media pool.
 
@@ -1103,12 +1171,7 @@ def generate_media(prompt, stem="", aspect="", ref=""):
             seen.add(slug)
             members.append(reg[slug])
     text = _labelled_prompt(prompt, members)
-    st = settings()["image"]
-    if st["provider"] == "drawthings":
-        img, ext = _paint_drawthings(text, aspect, refs, st["url"])
-    else:
-        img, ext = _paint_nanobanana(text, aspect, refs,
-                                     st["key"] or gemini_key())
+    img, ext = _paint_image(text, aspect, refs)
     stem = re.sub(r"[^a-z0-9_-]+", "-",
                   (stem or "art").lower()).strip("-")[:40] or "art"
     MEDIA.mkdir(parents=True, exist_ok=True)
@@ -5388,6 +5451,10 @@ class H(BaseHTTPRequestHandler):
         lock = None if u.path in ("/api/chat", "/api/assemble", "/api/book_preview",
                                   "/api/reveal", "/api/open_link",
                                   "/api/cast/reveal", "/api/cast/open",
+                                  # a painting takes ~15s and must not block
+                                  # typing; its one registry write takes the
+                                  # lock inside cast_paint
+                                  "/api/cast/paint",
                                   "/api/profile/impact",
                                   # slow and read-only, the same shape as
                                   # assemble — they must not block typing
@@ -6567,6 +6634,167 @@ class H(BaseHTTPRequestHandler):
                                want + [k for k in plates if k not in want]}
                 save_cast(c)
                 return self._send(200, {"ok": True})
+            if u.path == "/api/cast/promote":
+                # §6: the gesture that was missing — a pool picture becomes
+                # canon. The file is COPIED into the member's folder and the
+                # pool copy stays: pool law untouched, and any card showing
+                # it goes on showing it. The member may be new: promotion is
+                # one of the three doors a member arrives through (§7e).
+                name = re.sub(r"[^a-z0-9_-]", "", str(d.get("media") or ""))
+                try:
+                    src = media_file(name) if name else None
+                except FileNotFoundError:
+                    src = None
+                if src is None:
+                    return self._send(404, {"error": f'no media "{name}"'})
+                if src.suffix.lower() not in IMG_EXT:
+                    return self._send(400, {"error": "only a picture can be "
+                                            "a plate — not film"})
+                c = cast()
+                slug = str(d.get("slug") or "")
+                if d.get("new_title"):
+                    t = _clean(d.get("new_title"), 80)
+                    if not t:
+                        return self._send(400, {"error": "a title is needed"})
+                    slug = series_slug(t, c, fallback="member")
+                    c[slug] = {"kind": _clean(d.get("new_kind"), 24).lower()
+                               or "character",
+                               "title": t, "brief": "",
+                               "scope": _clean(d.get("scope"), 60),
+                               "key": "", "plates": {},
+                               "created": time.strftime("%Y-%m-%d %H:%M")}
+                m = c.get(slug)
+                if m is None:
+                    return self._send(404, {"error": "no such cast member"})
+                plates = m.setdefault("plates", {})
+                want = re.sub(r"[^a-z0-9_-]+", "-",
+                              str(d.get("plate") or "").lower()).strip("-")[:40]
+                if want and want in plates:
+                    return self._send(400, {"error": f'"{want}" is already '
+                                            "a slot here"})
+                slot = want or _free_name(set(plates),
+                                          src.stem[:40] or "plate", "new")
+                folder = CAST / slug
+                folder.mkdir(parents=True, exist_ok=True)
+                taken = {p.stem for p in folder.iterdir() if p.is_file()}
+                fname = _free_name(taken, slot, "new") + src.suffix.lower()
+                shutil.copy2(src, folder / fname)
+                plates[slot] = {"file": fname}
+                if d.get("key") or not m.get("key"):
+                    m["key"] = slot
+                save_cast(c)
+                return self._send(200, {"ok": True, "slug": slug,
+                                        "plate": slot})
+            if u.path == "/api/cast/accept":
+                # a candidate chosen into a named slot: canon by decision,
+                # never by accumulation (§7c). The file does not move.
+                c = cast()
+                m = c.get(d.get("slug") or "")
+                if m is None:
+                    return self._send(404, {"error": "no such cast member"})
+                f = str(d.get("file") or "")
+                cand = m.get("candidates") or []
+                if f not in cand:
+                    return self._send(404, {"error": "no such candidate"})
+                slot = re.sub(r"[^a-z0-9_-]+", "-",
+                              str(d.get("plate") or "").lower()).strip("-")[:40]
+                if not slot:
+                    return self._send(400, {"error": "a slot name is needed"})
+                plates = m.setdefault("plates", {})
+                if slot in plates:
+                    return self._send(400, {"error": f'"{slot}" is already '
+                                            "a slot here"})
+                plates[slot] = {"file": f}
+                cand.remove(f)
+                if not cand:
+                    m.pop("candidates", None)
+                if d.get("key") or not m.get("key"):
+                    m["key"] = slot
+                save_cast(c)
+                return self._send(200, {"ok": True, "plate": slot})
+            if u.path == "/api/cast/candidate/drop":
+                # off the row, not off the disk — the same law as dropping a
+                # variant from a card's shortlist
+                c = cast()
+                m = c.get(d.get("slug") or "")
+                if m is None:
+                    return self._send(404, {"error": "no such cast member"})
+                f = str(d.get("file") or "")
+                cand = m.get("candidates") or []
+                if f not in cand:
+                    return self._send(404, {"error": "no such candidate"})
+                cand.remove(f)
+                if not cand:
+                    m.pop("candidates", None)
+                save_cast(c)
+                return self._send(200, {"ok": True})
+            if u.path == "/api/cast/dup_look":
+                # §7c: one gesture for "she becomes a cosmonaut". Every plate
+                # carrying the look is copied into a new look, and each copy
+                # points at the very file its original shows — the repaint
+                # that follows then has something to match, and accepting a
+                # repaint repoints only the copy.
+                c = cast()
+                m = c.get(d.get("slug") or "")
+                if m is None:
+                    return self._send(404, {"error": "no such cast member"})
+                look = _clean(d.get("look"), 60)
+                to = _clean(d.get("to"), 60)
+                if not to:
+                    return self._send(400, {"error": "a name for the new "
+                                            "look is needed"})
+                plates = m.setdefault("plates", {})
+                src_p = [(s, p) for s, p in plates.items()
+                         if (p.get("look") or "") == look]
+                if not src_p:
+                    return self._send(404, {"error": "no plates carry "
+                                            "that look"})
+                tos = (re.sub(r"[^a-z0-9_-]+", "-", to.lower())
+                       .strip("-")[:24] or "look")
+                made = []
+                for s, p in src_p:
+                    view = re.sub(r"[^a-z0-9_-]+", "-",
+                                  (p.get("view") or s).lower()).strip("-")
+                    ns = _free_name(set(plates),
+                                    f"{tos}-{view}"[:40].strip("-"), "new")
+                    plates[ns] = {**p, "look": to}
+                    made.append(ns)
+                save_cast(c)
+                return self._send(200, {"ok": True, "plates": made})
+            if u.path == "/api/cast/dup_member":
+                # the whole member, brief and voice bindings included (§7c).
+                # Plates live in the member's OWN folder, so the files are
+                # copied across — a slug in a path is a fence, not a label.
+                c = cast()
+                slug = str(d.get("slug") or "")
+                m = c.get(slug)
+                if m is None:
+                    return self._send(404, {"error": "no such cast member"})
+                t = f"{m.get('title') or slug} copy"[:80]
+                new = series_slug(t, c, fallback="member")
+                nm = json.loads(json.dumps(m))
+                nm["title"] = t
+                nm["created"] = time.strftime("%Y-%m-%d %H:%M")
+                files = [p.get("file") for p in (nm.get("plates") or {}).values()]
+                files += nm.get("candidates") or []
+                (CAST / new).mkdir(parents=True, exist_ok=True)
+                for fn in files:
+                    if fn and (CAST / slug / fn).is_file():
+                        shutil.copy2(CAST / slug / fn, CAST / new / fn)
+                c[new] = nm
+                save_cast(c)
+                return self._send(200, {"ok": True, "slug": new})
+            if u.path == "/api/cast/paint":
+                # slow and lockless, like /api/media/generate — cast_paint
+                # takes the lock itself for the one registry append at the end
+                try:
+                    fname = cast_paint(str(d.get("slug") or ""),
+                                       str(d.get("prompt") or ""),
+                                       str(d.get("plate") or ""),
+                                       str(d.get("stem") or ""))
+                except (ValueError, RuntimeError) as ex:
+                    return self._send(400, {"error": str(ex)})
+                return self._send(200, {"ok": True, "file": fname})
             if u.path == "/api/cast/reveal":
                 # the member's folder in Finder — where its plates live, and
                 # the honest answer to "where did my picture go"
@@ -6580,17 +6808,22 @@ class H(BaseHTTPRequestHandler):
                 subprocess.run([OPEN_CMD, str(folder)], check=False)
                 return self._send(200, {"ok": True})
             if u.path == "/api/cast/open":
-                # one plate, in whatever this machine opens pictures with.
-                # The path is built from the registry, never the request.
+                # one plate or candidate, in whatever this machine opens
+                # pictures with. The file name must be one the REGISTRY
+                # holds for this member — the path is never the request's.
                 slug = str(d.get("slug") or "")
                 if not CAST_SLUG_RE.match(slug):
                     return self._send(404, {"error": "no such cast member"})
-                m = cast().get(slug)
-                p = (m or {}).get("plates", {}).get(str(d.get("plate") or ""))
-                f = (CAST / slug / p["file"]) if p and p.get("file") else None
+                m = cast().get(slug) or {}
+                p = m.get("plates", {}).get(str(d.get("plate") or ""))
+                fn = (p or {}).get("file") or ""
+                if not fn and str(d.get("file") or "") in (m.get("candidates")
+                                                          or []):
+                    fn = str(d["file"])
+                f = (CAST / slug / fn) if fn else None
                 if (f is None or not f.is_file()
-                        or not re.fullmatch(r"[a-z0-9_.-]{1,80}", p["file"])
-                        or ".." in p["file"]):
+                        or not re.fullmatch(r"[a-z0-9_.-]{1,80}", fn)
+                        or ".." in fn):
                     return self._send(404, {"error": "no file for that plate"})
                 subprocess.run([OPEN_CMD, str(f)], check=False)
                 return self._send(200, {"ok": True})
