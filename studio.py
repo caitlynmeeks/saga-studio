@@ -445,6 +445,10 @@ CAST = ROOT / "cast"                      # plate files: cast/<slug>/<file>
 # The slot (plate) name is the addressable half of a ref's second segment.
 CAST_SLUG_RE = re.compile(r"^[a-z0-9_-]{1,60}$")
 PLATE_RE = re.compile(r"^[a-z0-9_-]{1,40}$")
+# What one item in a card's `ref` may be: a bare pool name exactly as ever,
+# `@slug` for a member's key plate, or `@slug/plate` for that exact plate.
+# `@maisie/suit-blue-3q` is as deep as a reference ever goes (CAST.md §3).
+REF_RE = re.compile(r"^@?[a-z0-9_-]{1,60}(/[a-z0-9_-]{1,40})?$")
 # `engine` defaults to chatterbox so that adding a second engine changes nothing
 # until a profile is deliberately moved across — every wav already on disk keeps
 # its name and stays valid. `lang` and `speed` mean nothing to chatterbox and are
@@ -610,7 +614,8 @@ def library_counts():
                     if g and g != chosen:
                         claim(g, 2, d.name, title, chosen)
             for r in ref_list(c.get("ref")):
-                claim(r, 1, d.name, title)
+                if not r.startswith("@"):     # a plate is filed, not homeless
+                    claim(r, 1, d.name, title)
     return profs, clips, media, home
 
 
@@ -994,10 +999,12 @@ def media_refs_of(doc):
 
     Nobody ever sees one, which is exactly why they went missing from the
     archive. But a project that loses its references can no longer paint in
-    its own style, so a copy that drops them is not a copy of the project."""
+    its own style, so a copy that drops them is not a copy of the project.
+    Only POOL names belong here: an @entity ref names a cast plate, which
+    is cast_of's business (CAST.md §8), not the pool closure's."""
     out = set()
     for c in doc["chunks"]:
-        out |= set(ref_list(c.get("ref")))
+        out |= {r for r in ref_list(c.get("ref")) if not r.startswith("@")}
     return out
 
 
@@ -1047,6 +1054,29 @@ def image_ready():
     return bool(st["key"] or gemini_key())
 
 
+def _labelled_prompt(prompt, members):
+    """The words half of CAST.md §4: each referenced member's brief goes in
+    as a sentence beside the plates that show it, in a FIXED order — style,
+    then cast, then setting, then the shot — because consistent ordering is
+    itself a consistency lever with these models. No members, no dressing:
+    the prompt goes as it always went."""
+    heads = {"style": "Style", "character": "Cast", "location": "Setting"}
+    rank = {"style": 0, "character": 1, "location": 2}
+    lines = []
+    for m in sorted(members, key=lambda m: rank.get(m.get("kind") or "", 3)):
+        brief = (m.get("brief") or "").strip().rstrip(".")
+        if not brief:
+            continue
+        kind = m.get("kind") or ""
+        head = heads.get(kind, (kind or "reference").capitalize())
+        title = (m.get("title") or "").strip()
+        lines.append(f"{head}: {brief}." if kind == "style" or not title
+                     else f"{head}: {title}, {brief}.")
+    if not lines:
+        return prompt
+    return "\n".join(lines) + f"\n\nShot: {prompt}"
+
+
 def generate_media(prompt, stem="", aspect="", ref=""):
     """Ask the chosen illustrator for a picture and file it in the media pool.
 
@@ -1055,21 +1085,29 @@ def generate_media(prompt, stem="", aspect="", ref=""):
     media is global, and replacing a name would change every episode showing
     it. 16:9 unless asked otherwise: the stage and the animatic export are
     widescreen, and a square picture would sit pillarboxed between them.
-    `ref` names pictures already in the pool to send along as references —
-    one name or a list of them; the model matches their style or subject,
-    which is how a cast of images stays one cast. Returns the name the pool
-    filed it under."""
+    `ref` is one name or a list: pool pictures as ever, and `@member` or
+    `@member/plate` for cast plates (CAST.md §3). Each resolves to an image
+    WITH a label saying what it is for, and each @member also brings its
+    brief along as words — a picture and a sentence agreeing beat either
+    alone. Returns the name the pool filed it under."""
     if not prompt.strip():
         raise ValueError("an empty prompt paints nothing")
     aspect = aspect or "16:9"
     if aspect not in NB_ASPECTS:
         raise ValueError(f"aspect must be one of: {', '.join(NB_ASPECTS)}")
-    refs = ref_list(ref)
+    refs = [resolve_ref(r) for r in ref_list(ref)]
+    reg, members, seen = cast(), [], set()
+    for r in ref_list(ref):
+        slug = r[1:].partition("/")[0] if r.startswith("@") else ""
+        if slug and slug not in seen and slug in reg:
+            seen.add(slug)
+            members.append(reg[slug])
+    text = _labelled_prompt(prompt, members)
     st = settings()["image"]
     if st["provider"] == "drawthings":
-        img, ext = _paint_drawthings(prompt, aspect, refs, st["url"])
+        img, ext = _paint_drawthings(text, aspect, refs, st["url"])
     else:
-        img, ext = _paint_nanobanana(prompt, aspect, refs,
+        img, ext = _paint_nanobanana(text, aspect, refs,
                                      st["key"] or gemini_key())
     stem = re.sub(r"[^a-z0-9_-]+", "-",
                   (stem or "art").lower()).strip("-")[:40] or "art"
@@ -1285,16 +1323,36 @@ def _ref_image(ref):
     return rf
 
 
+def resolve_ref(item):
+    """A ref item to (path, label). A bare name is a pool picture and labels
+    itself; an @entity is a plate and says what it is FOR, which is the half
+    the model was never told. The only place that knows what an @ means."""
+    if not item.startswith("@"):
+        return _ref_image(item), "Reference"
+    slug, _, plate = item[1:].partition("/")
+    e = cast().get(slug)
+    if not e:
+        raise ValueError(f'no cast member "{slug}"')
+    plate = plate or e.get("key") or next(iter(e.get("plates") or {}), "")
+    p = e.get("plates", {}).get(plate)
+    if not p:
+        raise ValueError(f'"{slug}" has no plate "{plate}"')
+    kind = (e.get("kind") or "reference").capitalize()
+    return CAST / slug / p["file"], \
+        f'{kind} reference ({e.get("title") or slug}, {plate})'
+
+
 def ref_list(v):
-    """The reference field in every shape it has worn: absent, one pool
-    name, or a list of them. Sanitised like every pool name, empties and
-    doubles dropped, order kept — the first reference is the one a
-    single-image painter gets."""
+    """The reference field in every shape it has worn: absent, one name, or
+    a list of them. A bare name is a pool picture, exactly as ever; `@slug`
+    is a cast member's key plate and `@slug/plate` an exact plate. Held to
+    REF_RE, empties and doubles dropped, order kept — the first reference
+    is the one a single-image painter gets."""
     vs = v if isinstance(v, (list, tuple)) else [v]
     out = []
     for x in vs:
-        x = re.sub(r"[^a-z0-9_-]", "", str(x or ""))
-        if x and x not in out:
+        x = re.sub(r"[^a-z0-9_@/-]", "", str(x or ""))
+        if x and REF_RE.match(x) and x not in out:
             out.append(x)
     return out
 
@@ -1325,9 +1383,11 @@ def _paint_drawthings(prompt, aspect, refs, url):
         # img2img with the reference underneath: it keeps the bones of the
         # picture and repaints the skin, the local cousin of a style match.
         # One canvas only — img2img paints over a single image, so of many
-        # references the FIRST is the one that goes under the brush.
+        # references the FIRST is the one that goes under the brush. It
+        # cannot take a gallery; that is a limit of the local painter, not
+        # of the design — the labelled text still rides in the prompt.
         route = "/sdapi/v1/img2img"
-        body["init_images"] = [base64.b64encode(_ref_image(refs[0])
+        body["init_images"] = [base64.b64encode(refs[0][0]
                                                 .read_bytes()).decode()]
         body["denoising_strength"] = 0.65
     req = urllib.request.Request(base + route,
@@ -1358,13 +1418,16 @@ def _paint_nanobanana(prompt, aspect, refs, key):
         raise RuntimeError("no Gemini API key. Paste one from "
                            "aistudio.google.com into the Settings tab.")
     parts = []
-    # the model takes a whole gallery of references — a face from one, a
-    # palette from another — so every name the card holds goes along
-    for ref in refs:
-        rf = _ref_image(ref)
+    # a described gallery, not an anonymous pile: the model takes a whole
+    # gallery of references — a face from one, a palette from another — and
+    # each one now arrives BEHIND a line saying what it is for. Sending four
+    # references without saying which is which is how you get blending
+    # (CAST.md §0 cause 4); the label is what actually kills the drift.
+    for path, label in refs:
+        parts.append({"text": f"{label}:"})
         parts.append({"inlineData": {
-            "mimeType": MEDIA_MIME.get(rf.suffix.lower(), "image/png"),
-            "data": base64.b64encode(rf.read_bytes()).decode()}})
+            "mimeType": MEDIA_MIME.get(path.suffix.lower(), "image/png"),
+            "data": base64.b64encode(path.read_bytes()).decode()}})
     parts.append({"text": prompt})
     body = json.dumps({
         "contents": [{"parts": parts}],

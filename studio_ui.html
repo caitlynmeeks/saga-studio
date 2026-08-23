@@ -289,6 +289,23 @@ body[data-mode=cast] #draftbar,body[data-mode=cast] #vfbar{display:none}
   text-align:center;color:var(--faint);cursor:pointer;font-size:12px;
   margin:16px 0 6px}
 #castdrop.hot{border-color:var(--green);color:var(--green);background:#131a17}
+/* the reference picker: the flat <select> grown into a thumbnail grid,
+   cast members first, then the raw pool for what the cast does not cover */
+.ctx.refpick{width:340px;max-height:420px;overflow-y:auto;padding:6px}
+.refpick .rphead{font-size:10.5px;color:var(--dim);text-transform:uppercase;
+  letter-spacing:.08em;margin:8px 4px 3px}
+.refpick .rcell{display:flex;gap:7px;align-items:center;padding:3px 6px;
+  border-radius:5px;cursor:pointer;font-size:12px}
+.refpick .rcell:hover{background:var(--panel);color:var(--bright)}
+.refpick .rcell img{width:44px;height:30px;object-fit:cover;border-radius:4px;
+  flex:none}
+.refpick .rcell span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.refpick .rcell .star{color:var(--amber);flex:none}
+/* a reference chip whose target has gone — visible, never silent */
+.refchip.broken{color:var(--amber);border-color:var(--amber)}
+/* a cast row mid-drag lights the visual cards it may land on */
+.chunk.reftgt{outline:1px dashed var(--green);outline-offset:2px}
+.chunk.refhot{outline:2px solid var(--green);outline-offset:2px}
 #ask{width:100%;height:64px;resize:vertical}
 .pill{font-size:10.5px;border:1px solid var(--line);border-radius:99px;padding:1px 7px;color:var(--faint)}
 /* Tag chips live in the card head. Quiet by default — a tag is a label until a
@@ -2808,6 +2825,7 @@ $('mediafile').onchange=async e=>{
 // become its own window on a second display one day.
 let CASTSEL=null;                 // whose board the deck is wearing
 let DRAGPLATE=null;               // a plate mid-reorder, so file drops stand aside
+let DRAGCAST=null;                // a member mid-drag towards a visual card
 let CFOLD={};                     // folded kind groups, per machine
 try{ CFOLD=JSON.parse(localStorage.getItem('saga.cfold')||'{}'); }catch(e){}
 function foldCast(k){
@@ -2848,9 +2866,10 @@ function castThumb(m){
 }
 function castRow(m){
   const n=Object.keys(m.plates||{}).length;
-  return `<div class="proj ${CASTSEL===m.slug?'sel':''}"
+  return `<div class="proj ${CASTSEL===m.slug?'sel':''}" draggable="true"
+    ondragstart="castDragStart(event,'${m.slug}')" ondragend="castDragEnd()"
     onclick="openBoard('${m.slug}')" oncontextmenu="castMenu(event,'${m.slug}')"
-    title="open the board — plates, looks, the key">
+    title="open the board — plates, looks, the key · drag onto a visual card to reference it">
     <div style="display:flex;gap:6px;align-items:center">
       ${castThumb(m)}
       <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(m.title||m.slug)}</span>
@@ -2908,6 +2927,49 @@ function renderCast(){
   document.querySelectorAll('#cast .mgrp[data-k]').forEach(el=>
     el.addEventListener('click',e=>{ e.stopPropagation(); foldCast(el.dataset.k); }));
 }
+// ── dragging a member onto a card ── the reaching half of the Cast tab
+// (CAST.md §7a): the row lands ON a visual card and leaves `@slug` in its
+// references. The deck's own drop gates all check their own payloads, so a
+// cast drag slides past them; these two delegated listeners are its only
+// audience. The paint row opens on the card that took the drop, so the new
+// chip is seen and not just believed in.
+function castDragStart(e,slug){
+  DRAGCAST=slug;
+  e.dataTransfer.effectAllowed='copy';
+  try{ e.dataTransfer.setData('text/plain','@'+slug); }catch(_){}
+  let n=0;
+  if(DOC)for(const c of DOC.chunks)if(c.type==='visual'){
+    const el=$('c'+c.id); if(el){ el.classList.add('reftgt'); n++; }
+  }
+  $('status').textContent=n
+    ?`drop “@${slug}” on a lit visual card to paint against it`
+    :(DOC?'no visual cards in this episode — a reference lands on a visual card'
+         :'open an episode first — a reference needs a card to land on');
+}
+function castDragEnd(){
+  DRAGCAST=null;
+  document.querySelectorAll('#main .reftgt,#main .refhot').forEach(el=>
+    el.classList.remove('reftgt','refhot'));
+}
+$('main').addEventListener('dragover',e=>{
+  if(!DRAGCAST)return;
+  const el=e.target.closest('.chunk.reftgt'); if(!el)return;
+  e.preventDefault(); e.dataTransfer.dropEffect='copy';
+  document.querySelectorAll('#main .refhot').forEach(x=>x.classList.remove('refhot'));
+  el.classList.add('refhot');
+});
+$('main').addEventListener('drop',e=>{
+  if(!DRAGCAST)return;
+  const el=e.target.closest('.chunk.reftgt');
+  const slug=DRAGCAST; castDragEnd();
+  if(!el)return;
+  e.preventDefault(); e.stopPropagation();
+  const id=+el.id.slice(1);
+  PAINTS.add(id);                 // surface the chip that just landed
+  addRef(id,'@'+slug);
+  $('status').innerHTML=`<span class="ok">“@${slug}” referenced on card #${id}</span>`+
+    ' — its plate and brief ride along when it paints';
+});
 function castMenu(e,slug){
   const m=(STATE.cast||{})[slug]; if(!m)return;
   openCtx(e,[
@@ -4198,7 +4260,7 @@ function visualCard(c){
 // this card has tried on.
 let PAINTS=new Set();
 function paintRow(c){
-  const media=STATE.media||[], nb=!!STATE.nanobanana;
+  const nb=!!STATE.nanobanana;
   return `<div id="pr${c.id}">
     <div class="arow">
       <textarea id="vp${c.id}" rows="2" style="flex:1;resize:vertical;min-height:38px"
@@ -4207,14 +4269,14 @@ function paintRow(c){
         onblur="setCard(${c.id},{note:this.value})"${c.locked?' readonly':''}>${esc(c.note||'')}</textarea>
     </div>
     <div class="arow" style="flex-wrap:wrap">
-      ${refsOf(c).map(n=>`<button class="tiny" onclick="dropRef(${c.id},'${esc(n)}')"
-        title="stop using “${esc(n)}” as a reference — the picture stays in the pool">ref: ${esc(n)} ✕</button>`).join('')}
-      <select onchange="addRef(${c.id},this.value)" style="max-width:150px"
-        title="reference images — the model matches their style or subject, which keeps a story's pictures one cast. Nanobanana takes them all; Draw Things paints over the first.">
-        <option value="">${refsOf(c).length?'+ another reference':'no reference'}</option>
-        ${media.filter(m=>m.kind!=='video'&&!refsOf(c).includes(m.name)).map(m=>
-          `<option value="${esc(m.name)}">ref: ${esc(m.name)}</option>`).join('')}
-      </select>
+      ${refsOf(c).map(n=>`<button class="tiny refchip ${refOk(n)?'':'broken'}"
+        onclick="dropRef(${c.id},'${esc(n)}')"
+        title="${refOk(n)
+          ?`stop using “${esc(n)}” as a reference — the ${n.startsWith('@')?'plate stays filed in the cast':'picture stays in the pool'}`
+          :`nothing answers to “${esc(n)}” any more — painting will refuse until it is dropped or restored`}">ref: ${esc(n)} ✕</button>`).join('')}
+      <button class="tiny" onclick="refPicker(event,${c.id})"
+        title="reference images — the model matches their style or subject, which keeps a story's pictures one cast. A cast member's plate arrives labelled, with its brief as words; nanobanana takes them all, Draw Things paints over the first.">${
+        refsOf(c).length?'+ reference':'no reference — add one'}</button>
       ${(c.gen||[]).length?`<button onclick="genMenu(event,${c.id})"
         title="the variants painted for this card — choose one, drop one, paint another">${
         (c.gen||[]).length} variant${(c.gen||[]).length===1?'':'s'} ▾</button>`:''}
@@ -4230,6 +4292,15 @@ function paintRow(c){
 // name (every doc from before), or a list. Stored back the same way — bare
 // name for one, list for more — so old docs and new stay interchangeable.
 const refsOf=c=>Array.isArray(c.ref)?c.ref.filter(Boolean):(c.ref?[c.ref]:[]);
+// whether anything still answers to a ref — the client-side mirror of
+// resolve_ref, for warning on the chip BEFORE a paint fails on it
+function refOk(n){
+  if(!n.startsWith('@'))return (STATE.media||[]).some(m=>m.name===n);
+  const [slug,plate]=n.slice(1).split('/');
+  const m=(STATE.cast||{})[slug]; if(!m)return false;
+  const plates=m.plates||{};
+  return plate?plate in plates:!!Object.keys(plates).length;
+}
 async function addRef(id,n){
   const c=DOC&&DOC.chunks.find(x=>x.id===id); if(!c||!n)return;
   const refs=refsOf(c); if(!refs.includes(n))refs.push(n);
@@ -4238,6 +4309,77 @@ async function addRef(id,n){
 async function dropRef(id,n){
   const c=DOC&&DOC.chunks.find(x=>x.id===id); if(!c)return;
   await setCard(id,{ref:refsOf(c).filter(x=>x!==n)},true);
+}
+// ── the reference picker ── the flat <select> grown into thumbnails
+// (CAST.md §7f): cast members first — the key plate under the member's own
+// name, then each plate — then the raw pool for what the cast does not
+// cover. Filled into the CTX shell the way ctxAsk does, so it closes and
+// positions like every other menu.
+function refPicker(e,id){
+  const c=DOC&&DOC.chunks.find(x=>x.id===id); if(!c)return;
+  openCtx(e,[]); if(!CTX)return;
+  CTX.classList.add('refpick');
+  const have=refsOf(c), shelf=castShelf();
+  const pth=(slug,p)=>`/api/plate?slug=${slug}&f=${encodeURIComponent(p.file)}`;
+  const cell=(val,img,label,star,find)=>`<div class="rcell" data-ref="${val}"
+    data-find="${aq(find)}" title="${val}">
+    ${img?`<img src="${img}" loading="lazy">`:'<span style="width:44px;text-align:center;flex:none">🎭</span>'}
+    ${star?'<span class="star" title="follows the key, wherever it points">★</span>':''}
+    <span>${esc(label)}</span></div>`;
+  let html=`<input id="rpq" placeholder="filter…" style="width:100%;margin-bottom:2px">`;
+  const member=m=>{
+    const plates=Object.entries(m.plates||{});
+    if(!plates.length)return '';               // nothing to point at yet
+    const find=[m.slug,m.title,m.kind,m.brief].join(' ');
+    const rows=[];
+    if(!have.includes('@'+m.slug)){
+      const key=(m.plates||{})[m.key]||plates[0][1];
+      rows.push(cell('@'+m.slug,key&&key.file?pth(m.slug,key):'', '@'+m.slug,true,find));
+    }
+    for(const [slot,p] of plates)
+      if(!have.includes(`@${m.slug}/${slot}`))
+        rows.push(cell(`@${m.slug}/${slot}`,p.file?pth(m.slug,p):'',slot,false,
+          find+' '+slot+' '+(p.look||'')));
+    return rows.length
+      ?`<div class="rphead" data-find="${aq(find)}">${esc(m.title||m.slug)} · ${esc(m.kind||'member')}</div>`
+        +rows.join('')
+      :'';
+  };
+  // this shelf's cast leads, but everyone stays reachable: scope decides
+  // where a member is SHOWN, never which one a ref FINDS, and a picker
+  // that hides the findable would be a trap the tab's toggle cannot open
+  const near=castRows().filter(m=>!m.scope||m.scope===shelf);
+  const far=castRows().filter(m=>m.scope&&m.scope!==shelf);
+  html+=near.map(member).join('');
+  const farhtml=far.map(member).join('');
+  if(farhtml)html+=`<div class="rphead" data-find="">— other shelves —</div>`+farhtml;
+  const pool=(STATE.media||[]).filter(m=>m.kind!=='video'&&!have.includes(m.name));
+  if(pool.length){
+    html+=`<div class="rphead" data-find="">the pool</div>`
+      +pool.map(m=>cell(m.name,
+        `/api/media?f=${encodeURIComponent(m.name)}&v=${m.added}`,
+        m.name,false,m.name)).join('');
+  }
+  if(!/rcell/.test(html))
+    html+='<div class="mut" style="font-size:12px;padding:6px">nothing left to add</div>';
+  CTX.innerHTML=html;
+  // openCtx measured an empty shell; the filled grid is 340px of thumbnails,
+  // so take the screen-edge clamp again at the real size
+  CTX.style.left=Math.max(6,Math.min(e.clientX,innerWidth-CTX.offsetWidth-8))+'px';
+  CTX.style.top=Math.max(6,Math.min(e.clientY,innerHeight-CTX.offsetHeight-8))+'px';
+  CTX.addEventListener('click',ev=>{
+    const r=ev.target.closest('.rcell'); if(!r)return;
+    closeCtx(); addRef(id,r.dataset.ref);
+  });
+  const q=$('rpq');
+  q.oninput=()=>{
+    const v=q.value.trim().toLowerCase();
+    CTX.querySelectorAll('.rcell,.rphead').forEach(el=>
+      el.style.display=!v||(el.dataset.find||'').toLowerCase().includes(v)
+        ||(el.dataset.ref||'').includes(v)?'':'none');
+  };
+  q.onkeydown=ev=>ev.stopPropagation();
+  q.focus();
 }
 function togglePaint(id){
   const row=$('pr'+id);
