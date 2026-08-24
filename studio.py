@@ -1003,11 +1003,28 @@ def media_refs_of(doc):
     archive. But a project that loses its references can no longer paint in
     its own style, so a copy that drops them is not a copy of the project.
     Only POOL names belong here: an @entity ref names a cast plate, which
-    is cast_of's business (CAST.md §8), not the pool closure's."""
+    is cast_of's business (CAST.md §8), not the pool closure's. The story's
+    style tier can name pool pictures too, and those are equally something
+    a copy was painted against."""
     out = set()
     for c in doc["chunks"]:
         out |= {r for r in ref_list(c.get("ref")) if not r.startswith("@")}
+    out |= {r for r in ref_list((doc.get("style") or {}).get("refs"))
+            if not r.startswith("@")}
     return out
+
+
+def cast_of(doc):
+    """The cast members a project's cards reach for, and the plates they
+    name. A copy that loses these can no longer paint in the story's own
+    style, which is the same reason media_refs_of exists. The story's style
+    tier counts too — its refs travel inside the doc. The SHELF's tier does
+    not: a story stands alone, and the shelf record it sat on stays home."""
+    refs = []
+    for c in doc["chunks"]:
+        refs += ref_list(c.get("ref"))
+    refs += ref_list((doc.get("style") or {}).get("refs"))
+    return {r[1:].partition("/")[0] for r in refs if r.startswith("@")}
 
 
 def media_history_of(doc):
@@ -1917,6 +1934,8 @@ def import_md(title, md):
 #   projects/<name>/doc.json  cards, params, notes
 #   projects/<name>/source.md the untouched import
 #   voices/<stem>.wav         only the clips those profiles can speak with
+#   cast.json                 only the cast members those projects reach for
+#   cast/<slug>/<file>        their plates — reference artwork, never shown
 #   takes/<sha>.wav           the performances voiced cards are driven by
 #   audio/<hash>.wav          rendered chunks — optional, and nearly all the size
 #
@@ -1924,6 +1943,10 @@ def import_md(title, md):
 # mean decompressing a few hundred megabytes of audio to reach the last member.
 # The assembled mp3 in out/ is deliberately left out: it is derived, it is
 # large, and assemble() rebuilds it in seconds from the chunks that are here.
+#
+# Schema stays 1 across the cast's arrival, deliberately: an older studio's
+# allowlist below simply never extracts cast members, so a new archive opens
+# there whole-minus-cast instead of being refused outright.
 ARCHIVE_SCHEMA = 1
 
 # Extraction allowlist. tar members are attacker-controlled paths in the
@@ -1931,11 +1954,12 @@ ARCHIVE_SCHEMA = 1
 # program writes — which rules out absolute paths, "..", symlinks and devices
 # without relying on any particular Python version's tarfile filter.
 ARC_MEMBER = re.compile(
-    r"^(manifest\.json|profiles\.json"
+    r"^(manifest\.json|profiles\.json|cast\.json"
     r"|projects/[a-z0-9_-]{1,60}/(doc\.json|source\.md)"
     r"|voices/[a-z0-9_.-]{1,44}\.(wav|mp3|flac|m4a)"
     r"|clips/[a-z0-9_.-]{1,44}\.wav"
     r"|media/[a-z0-9_.-]{1,44}\.(png|jpe?g|webp|gif|mp4|webm|mov)"
+    r"|cast/[a-z0-9_-]{1,60}/[a-z0-9_.-]{1,60}\.(png|jpe?g|webp|gif)"
     r"|takes/[a-z0-9]{1,40}\.wav"
     r"|audio/[a-z0-9]{1,40}\.wav)$")
 _EXTRACT = {"filter": "data"} if hasattr(tarfile, "data_filter") else {}
@@ -1985,11 +2009,11 @@ def plan_export(names, with_audio):
     profs = profiles()
     plan = {"schema": ARCHIVE_SCHEMA, "created": time.strftime("%Y-%m-%d %H:%M:%S"),
             "with_audio": bool(with_audio), "projects": [], "voices": {},
-            "clips": {}, "media": {}, "takes": {}, "unreadable": [],
+            "clips": {}, "media": {}, "takes": {}, "cast": {}, "unreadable": [],
             "missing_voices": [], "missing_clips": [], "missing_media": [],
-            "missing_takes": [], "bytes": 0}
+            "missing_takes": [], "missing_cast": [], "bytes": 0}
     vnames, pnames, cnames, tnames, audio = set(), set(), set(), set(), {}
-    mnames, hnames = set(), set()
+    mnames, hnames, castslugs = set(), set(), set()
     for nm in names:
         try:
             doc = load(nm)
@@ -2007,6 +2031,7 @@ def plan_export(names, with_audio):
         # needed for the project to open whole somewhere else
         mnames |= media_of(doc) | media_refs_of(doc)
         hnames |= media_history_of(doc)
+        castslugs |= cast_of(doc)
         tnames |= takes_of(doc)
         rendered = 0
         for c in doc["chunks"]:
@@ -2068,6 +2093,31 @@ def plan_export(names, with_audio):
         plan["media"][hn] = {"file": f.name, "sha": sha256_file(f),
                              "bytes": f.stat().st_size}
         plan["bytes"] += f.stat().st_size
+    # The cast the cards reach for (CAST.md §8): each member's record, its
+    # plate files reported when missing — a plate is canon, and a backup
+    # short one canon picture should say so — and its candidates riding
+    # quietly on the history rule: packed when on disk, never mourned.
+    reg = cast()
+    arc_cast = {}
+    for slug in sorted(castslugs):
+        m = reg.get(slug)
+        if m is None:
+            plan["missing_cast"].append(f"@{slug}")
+            continue
+        arc_cast[slug] = m
+        quiet = set(m.get("candidates") or [])
+        named = [p.get("file") for p in (m.get("plates") or {}).values()]
+        for fn in named + sorted(quiet):
+            if not fn or f"{slug}/{fn}" in plan["cast"]:
+                continue
+            f = CAST / slug / fn
+            if not f.is_file():
+                if fn not in quiet:
+                    plan["missing_cast"].append(f"@{slug}/{fn}")
+                continue
+            plan["cast"][f"{slug}/{fn}"] = {"file": fn, "sha": sha256_file(f),
+                                            "bytes": f.stat().st_size}
+            plan["bytes"] += f.stat().st_size
     for tn in sorted(tnames):
         # Always packed, even without audio: a take is the *source* of a voiced
         # card, not a derived artefact. Leaving it out would restore a card
@@ -2081,6 +2131,7 @@ def plan_export(names, with_audio):
         plan["bytes"] += f.stat().st_size
     plan["kind"] = "library" if len(plan["projects"]) > 1 else "project"
     plan["_profiles"] = {n: profs[n] for n in sorted(pnames) if n in profs}
+    plan["_cast"] = arc_cast
     plan["_audio"] = audio
     return plan
 
@@ -2111,10 +2162,12 @@ def write_archive(plan, dest):
     higher levels spend minutes of CPU to save a couple of per cent."""
     audio = plan.pop("_audio", {})
     profs = plan.pop("_profiles", {})
+    arc_cast = plan.pop("_cast", {})
     manifest = dict(plan, audio=sorted(audio))
     with tarfile.open(dest, "w:gz", compresslevel=1 if plan["with_audio"] else 6) as tar:
         _add_bytes(tar, "manifest.json", json.dumps(manifest, indent=1).encode())
         _add_bytes(tar, "profiles.json", json.dumps(profs, indent=1).encode())
+        _add_bytes(tar, "cast.json", json.dumps(arc_cast, indent=1).encode())
         for p in plan["projects"]:
             d = ROOT / p["name"]
             _add_file(tar, d / "doc.json", f"projects/{p['name']}/doc.json")
@@ -2126,6 +2179,10 @@ def write_archive(plan, dest):
             _add_file(tar, CLIPS / meta["file"], f"clips/{meta['file']}")
         for meta in plan["media"].values():
             _add_file(tar, MEDIA / meta["file"], f"media/{meta['file']}")
+        for key, meta in plan["cast"].items():
+            slug = key.split("/", 1)[0]
+            _add_file(tar, CAST / slug / meta["file"],
+                      f"cast/{slug}/{meta['file']}")
         for meta in plan["takes"].values():
             _add_file(tar, TAKES / meta["file"], f"takes/{meta['file']}")
         for name, f in sorted(audio.items()):
@@ -2171,7 +2228,7 @@ def import_archive(path, mode="skip"):
     each cached WAV is filed under its new name. A plain restore onto the
     machine that made the archive renames nothing and takes the fast path."""
     rep = {"projects": [], "voices": [], "profiles": [], "clips": [],
-           "media": [], "audio": 0, "takes": 0, "skipped": []}
+           "media": [], "cast": [], "audio": 0, "takes": 0, "skipped": []}
     tmp = Path(tempfile.mkdtemp(prefix=".import-", dir=ROOT))
     try:
         with tarfile.open(path, "r:gz") as tar:
@@ -2267,6 +2324,46 @@ def import_archive(path, mode="skip"):
                 shutil.copy2(f, local)
                 rep["takes"] += 1
 
+        # ── the cast ── merged by slug on the same terms as profiles: an
+        # existing slug is KEPT, never overwritten (CAST.md §8). Kept means
+        # kept whole — the local member's plates stay its plates, and an
+        # imported @ref answers to whatever this library says the name
+        # means; if that leaves a pinned plate dangling, the card's chip
+        # says so in amber rather than anything being clobbered. Files are
+        # copied only for slugs that are new, and every name is held to the
+        # same alphabets the registry's own writers use.
+        try:
+            arc_cast = json.loads((tmp / "cast.json").read_text())
+        except (OSError, ValueError):
+            arc_cast = {}
+        if isinstance(arc_cast, dict):
+            local_cast = cast()
+            added = []
+            for slug, m in arc_cast.items():
+                if (not isinstance(m, dict) or not CAST_SLUG_RE.match(str(slug))
+                        or slug in local_cast):
+                    continue
+                fn_ok = re.compile(r"^[a-z0-9_.-]{1,60}$")
+                m["plates"] = {s: p for s, p in (m.get("plates") or {}).items()
+                               if PLATE_RE.match(str(s)) and isinstance(p, dict)
+                               and fn_ok.match(str(p.get("file") or ""))}
+                m["candidates"] = [f for f in (m.get("candidates") or [])
+                                   if fn_ok.match(str(f))]
+                if not m["candidates"]:
+                    m.pop("candidates")
+                local_cast[slug] = m
+                added.append(slug)
+                src_dir = tmp / "cast" / slug
+                if src_dir.is_dir():
+                    (CAST / slug).mkdir(parents=True, exist_ok=True)
+                    for f in sorted(src_dir.iterdir()):
+                        dst = CAST / slug / f.name
+                        if f.is_file() and not dst.exists():
+                            shutil.copy2(f, dst)
+            if added:
+                save_cast(local_cast)
+                rep["cast"] = [f"@{s}" for s in added]
+
         # ── profiles ──
         local_profs = profiles()
         pmap = {}
@@ -2335,6 +2432,11 @@ def import_archive(path, mode="skip"):
             dp = doc.get("params") or {}
             if dp.get("voice"):
                 dp["voice"] = vmap.get(dp["voice"], dp["voice"])
+            # the story style's pool refs follow a renamed picture the same
+            # way a card's do; its @refs pass through untouched, as ever
+            st = doc.get("style") or {}
+            if st.get("refs"):
+                st["refs"] = [mmap.get(r, r) for r in ref_list(st["refs"])]
             new = [chunk_hash(c, doc, local_profs) if is_renderable(c) else None
                    for c in doc["chunks"]]
 
@@ -4922,6 +5024,7 @@ class H(BaseHTTPRequestHandler):
             if u.path == "/api/export_plan":
                 plan.pop("_audio", None)
                 plan.pop("_profiles", None)
+                plan.pop("_cast", None)
                 return self._send(200, plan)
             if not plan["projects"]:
                 return self._send(404, {"error": "nothing to export"})

@@ -1049,15 +1049,18 @@ async function doExport(qs){
   // The download only begins once the server has packed the whole archive, so
   // say what is happening rather than sitting there looking broken.
   const nclips=Object.keys(plan.clips||{}).length;
+  const ncast=Object.keys(plan.cast||{}).length;
   m.innerHTML=`packing ${plan.projects.length} episode(s), ${rendered} rendered chunk(s), `+
     `${Object.keys(plan.voices).length} voice(s)`+
     (nclips?`, ${nclips} audio clip(s)`:'')+
+    (ncast?`, ${ncast} cast plate(s)`:'')+
     ` — about <b>${size(plan.bytes)}</b>.<br>`+
     `<span class="mut">your browser saves it when it is ready`+
     (plan.bytes>2e8?' — a minute or so at this size':'')+`</span>`+
     (plan.unreadable.length?`<br><span class="warn">left out, unreadable: ${plan.unreadable.map(esc).join(', ')}</span>`:'')+
     (plan.missing_voices.length?`<br><span class="warn">voice clip missing from disk, so not in the backup: ${plan.missing_voices.map(esc).join(', ')}</span>`:'')+
-    ((plan.missing_clips||[]).length?`<br><span class="warn">audio clip missing from disk, so not in the backup: ${plan.missing_clips.map(esc).join(', ')}</span>`:'');
+    ((plan.missing_clips||[]).length?`<br><span class="warn">audio clip missing from disk, so not in the backup: ${plan.missing_clips.map(esc).join(', ')}</span>`:'')+
+    ((plan.missing_cast||[]).length?`<br><span class="warn">cast plate missing from disk, so not in the backup: ${plan.missing_cast.map(esc).join(', ')}</span>`:'');
   window.location='/api/export?'+q;
 }
 
@@ -1092,6 +1095,7 @@ async function archDone(j){
   if(j.error) return void(m.innerHTML=`<span class="warn">${esc(j.error)}</span>`);
   const bits=[`restored ${j.projects.length} episode(s)`];
   if(j.audio) bits.push(`${j.audio} rendered chunk(s)`);
+  if((j.cast||[]).length) bits.push(`${j.cast.length} cast member(s) joined`);
   if(j.skipped.length) bits.push(`${j.skipped.length} already here, left alone`);
   // Renames are the one thing worth reading: they mean a name collided and the
   // incoming copy landed beside yours rather than over it.
