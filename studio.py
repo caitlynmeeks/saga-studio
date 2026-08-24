@@ -1130,8 +1130,21 @@ def cast_paint(slug, prompt, plate="", stem=""):
         k = m.get("key") or next(iter(plates))
         if k != plate:
             refs.append(f"@{slug}/{k}")
+    # §7d in full: the collection's style rides too, named by the member's
+    # own scope — the board still reads no DOC. Without this, a member's
+    # FIRST plate is painted with no Style line at all, comes out in the
+    # model's own taste, becomes the key, and then every later plate is
+    # painted against it: the style drift moves up a level and calcifies.
+    # (Found by Musti the cat pirate, who came out Pixar in a flat world.)
+    st = (series().get(m.get("scope") or "") or {}).get("style") or {}
+    stext = str(st.get("text") or "").strip()
+    for r in ref_list(st.get("refs")):
+        if r not in refs:
+            refs.append(r)
     rr = [resolve_ref(r) for r in refs]
-    text = _labelled_prompt(prompt, [m])
+    text = _labelled_prompt(prompt,
+                            ([{"kind": "style", "brief": stext}] if stext
+                             else []) + [m])
     img, ext = _paint_image(text, "16:9", rr)
     stem = (re.sub(r"[^a-z0-9_-]+", "-", (stem or "candidate").lower())
             .strip("-")[:40] or "candidate")
