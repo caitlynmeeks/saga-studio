@@ -65,6 +65,12 @@ background:none;color:var(--dim);padding:3px 9px 5px;font-size:11.5px}
 .rpane{overflow-y:auto;padding:12px;min-height:0;display:none}
 body[data-tab=inspect] #inspect{display:block}
 body[data-tab=chat] #chat{display:flex;flex-direction:column}
+body[data-tab=queue] #queue{display:block}
+.qrow{display:flex;gap:7px;align-items:center;padding:6px 4px;
+  border-bottom:1px solid var(--line);font-size:12px}
+.qrow .qstat{flex:none;width:76px;color:var(--dim);font-size:11px}
+.qrow .qwhat{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;
+  white-space:nowrap}
 /* The centre column is one grid cell holding two stacked children: the
    find/replace bar and the scrolling card list. Left as siblings of <main>
    they became grid items of their own and shunted every later panel a
@@ -829,6 +835,7 @@ color:var(--faint);margin:0 0 9px;font-weight:600}
  <div id="rtabs">
    <button id="tabInspect" onclick="setTab('inspect')">Inspector</button>
    <button id="tabChat" onclick="setTab('chat')">Drama Manager</button>
+   <button id="tabQueue" onclick="setTab('queue')">Queue</button>
    <span style="flex:1"></span>
    <button class="tiny" onclick="setPanel(false)" title="hide this panel">×</button>
  </div>
@@ -849,6 +856,17 @@ Selected cards go along as context.</div></div>
     <button onclick="chatNew()" title="start a fresh conversation — the old one is forgotten">↺ New</button>
     <span class="mut" id="chatnote" style="font-size:11px;align-self:center"></span>
   </div>
+ </div>
+ <div id="queue" class="rpane">
+  <h2>The Print Queue</h2>
+  <div style="display:flex;gap:6px;margin:6px 0 10px;align-items:center">
+    <button id="qpause" class="tiny" onclick="queuePause()"
+      title="hold the queue — the card in flight finishes, the rest wait">⏸ Pause</button>
+    <button id="qclear" class="tiny" onclick="queueClear()" hidden
+      title="forget the finished rows — rendered files stay on disk">clear finished</button>
+  </div>
+  <div id="qlist" class="mut" style="font-size:12px">nothing in line —
+    renders, previews and paints queue up here</div>
  </div>
 </div>
 
@@ -884,6 +902,11 @@ Selected cards go along as context.</div></div>
 <script>
 const $=i=>document.getElementById(i);
 let DOC=null, SEL=new Set(), STATE={}, JOBS={}, POLL=null, HEIGHT={};
+// the Queue tab's state lives HERE, at the top: setTab may kick the queue
+// poll during boot, long before the tab's own code — a declaration down
+// there would be a temporal dead zone and one thrown ReferenceError
+// silences every const below it (hard-won knowledge)
+let QDATA=null, QPOLL=null, QSEQ=0;
 let BAKETIMER=null, WASBAKING=false;
 // CUR is the card you are working in — the one edit-then-listen starts from.
 // SEL is a different idea entirely (which cards go to Brenda as
@@ -900,6 +923,7 @@ function paintPanel(){
   const open=document.body.dataset.panel==='on', tab=document.body.dataset.tab;
   $('tabInspect').classList.toggle('on',tab==='inspect');
   $('tabChat').classList.toggle('on',tab==='chat');
+  $('tabQueue').classList.toggle('on',tab==='queue');
   $('chatb').classList.toggle('on',open);
 }
 function setPanel(on){
@@ -910,6 +934,7 @@ function setPanel(on){
 function setTab(t){
   document.body.dataset.tab=t;
   paintPanel();
+  if(t==='queue')kickQueue();     // open on a live picture, never a stale one
   try{ localStorage.setItem('saga.tab',t); }catch(e){}
 }
 function showPanel(t){ setPanel(true); setTab(t); }
@@ -3412,9 +3437,12 @@ async function boardPaint(prompt,stem){
   BOARDPAINTING=true;
   const b=$('cpb'); if(b){ b.disabled=true; b.textContent='painting…'; }
   $('status').textContent='painting a candidate — about 15 seconds';
-  let r; try{ r=await api('/api/cast/paint',{slug,prompt,plate:PAINTTGT,
-    file:PAINTCAND,stem:stem||'candidate'}); }
-  catch(ex){ r={error:String(ex)}; }
+  let r; try{
+    const rq=api('/api/cast/paint',{slug,prompt,plate:PAINTTGT,
+      file:PAINTCAND,stem:stem||'candidate'});
+    kickQueue();                   // it shows in the queue window at once
+    r=await rq;
+  }catch(ex){ r={error:String(ex)}; }
   BOARDPAINTING=false;
   if(r.error){
     if(CASTSEL===slug)renderBoard(true);
@@ -4771,8 +4799,12 @@ async function genImage(id){
   const stem=(c.media||'').replace(/-new(-\d+)?$/,'')||(DOC.name+'-'+id);
   // name and id ride along so the style tiers above this card can dress the
   // paint — and so the card's own `nostyle` is honoured where it is known
-  const r=await api('/api/media/generate',{prompt,media:stem,ref:c.ref||'',
+  // the paint files itself in the queue window the moment the request
+  // lands, so kick the poll now rather than when the answer comes back
+  const rq=api('/api/media/generate',{prompt,media:stem,ref:c.ref||'',
     name:DOC.name,id,vary});
+  kickQueue();
+  const r=await rq;
   if(r.error){
     if(b){ b.disabled=false; b.textContent=vary?'Paint a Variant':c.media?'Repaint':'Paint'; }
     $('s'+id).innerHTML=`<span style="color:var(--red)">${esc(r.error)}</span>`;
@@ -5702,11 +5734,13 @@ async function one(id,audition){
   $('s'+id).textContent='';
   // speak what is on screen, not what the server last heard about
   await flush(id);
-  const r=await api('/api/render',{name:DOC.name,id,force:true});
+  const c=DOC&&DOC.chunks.find(x=>x.id===id);
+  const r=await api('/api/render',{name:DOC.name,id,force:true,
+    label:((c&&c.text)||'').slice(0,80)});
   if(r.error){ fail(id,r.error); return; }
   JOBS[r.job]={id,kind:'render',play:!!audition};
   $('s'+id).textContent='queued — carry on, it renders in the background';
-  pollJobs(); }
+  pollJobs(); kickQueue(); }
 
 // Render failures used to be written into the card and then wiped a moment
 // later by the refresh that followed, which is no way to learn that torchaudio
@@ -5757,7 +5791,7 @@ async function prev(id){
                  syncPrevBtn(id); $('s'+id).textContent=r.error; return; }
     JOBS[r.job]={id,kind:'preview',play:true};
     $('s'+id).textContent='queued…';
-    pollJobs();
+    pollJobs(); kickQueue();
   }finally{ keep(); } }
 // One audio channel for the whole app: pressing play twice restarts the clip
 // instead of layering a second voice over the first.
@@ -6165,7 +6199,7 @@ async function bake(){
   // optimistically: a short bake — an error on card one, or nothing stale —
   // can finish before the first poll, and the ending must still be told
   WASBAKING=true;
-  refresh();
+  refresh(); kickQueue();
 }
 async function stopBake(){
   const b=$('stopb'); b.disabled=true; b.textContent='stopping…';
@@ -6739,6 +6773,9 @@ async function pollJobs(){
   let changed=false;
   const active=new Set();
   for(const j of st.jobs){
+    // paints file themselves in the jobs table for the queue tab, but the
+    // per-card render buttons are not theirs to dress
+    if(j.kind!=='render'&&j.kind!=='preview')continue;
     const mine=JOBS[j.id];
     if(j.status==='queued'||j.status==='running'){
       active.add(j.chunk);
@@ -6779,6 +6816,113 @@ async function pollJobs(){
   if(st.busy) POLL=setTimeout(pollJobs,1500);
 }
 pollJobs();
+
+// ── the print queue ── the Queue tab is a printer-queue window: every
+// render, preview and paint the studio is doing or about to do, in the
+// order it will do them, plus what just finished. Voice work runs through
+// the one worker (MPS law) so it pauses, cancels and re-renders; paints
+// run beside the queue in their own request threads, so they are listed
+// but not held — the window says so rather than pretending.
+function queueOpen(){ return document.body.dataset.panel==='on'
+                          && document.body.dataset.tab==='queue'; }
+function kickQueue(){ pollQueue(); }
+async function pollQueue(){
+  const me=++QSEQ;                // a newer poll supersedes this one
+  if(QPOLL){ clearTimeout(QPOLL); QPOLL=null; }
+  let st; try{ st=await api('/api/queue'); }catch(e){ st=null; }
+  if(me!==QSEQ)return;            // superseded mid-flight: it schedules, not us
+  if(!st||st.error)return;
+  QDATA=st;
+  const busy=st.busy+(st.bake&&st.bake.running?1:0);
+  $('tabQueue').textContent=busy?`Queue · ${busy}`:'Queue';
+  if(queueOpen())renderQueue();
+  // keep watching while anything is moving, or while the window is open —
+  // shut and idle, the poll rests until a kick
+  if(busy||queueOpen())QPOLL=setTimeout(pollQueue,1500);
+}
+function renderQueue(){
+  const st=QDATA; if(!st)return;
+  $('qpause').textContent=st.paused?'▶ Resume':'⏸ Pause';
+  $('qpause').classList.toggle('pri',st.paused);
+  $('qpause').title=st.paused
+    ?'let the queue run again'
+    :'hold the queue — the card in flight finishes, the rest wait. Paints are not held: they run beside the queue, not in it.';
+  const title=n=>{ const p=(STATE.projects||[]).find(x=>x.name===n);
+                   return p?p.title:n; };
+  const what=j=>{
+    const where=j.project
+      ?`${title(j.project)}${j.chunk!=null?` · card #${j.chunk}`:''}`
+      :'the cast board';
+    const lab=(j.label||j.text||'').replace(/\s+/g,' ').trim();
+    return `<b>${esc(j.kind)}</b> — ${esc(where)}${
+      lab?` — <span class="mut">${esc(lab.slice(0,60))}</span>`:''}`;
+  };
+  const row=(j,stat,btns)=>{
+    const jump=j.project&&DOC&&j.project===DOC.name&&j.chunk!=null;
+    // the panel is narrow and the row ellipsizes — the full words ride on
+    // hover, with the jump hint when the card is one click away
+    const lab=(j.label||j.text||'').replace(/\s+/g,' ').trim();
+    const tt=esc(lab)+(jump?(lab?' — ':'')+'click to visit the card':'');
+    return `<div class="qrow"${jump?` style="cursor:pointer" onclick="queueJump(${
+      j.chunk})"`:''}${tt?` title="${tt}"`:''}>
+      <span class="qstat">${stat}</span><span class="qwhat">${what(j)}</span>${btns||''}</div>`;
+  };
+  const jobs=st.jobs||[];
+  const running=jobs.filter(j=>j.status==='running');
+  const queued=jobs.filter(j=>j.status==='queued');
+  const done=jobs.filter(j=>j.status==='done'||j.status==='error'||j.status==='canceled')
+                 .slice(-15).reverse();
+  let html='';
+  if(st.paused)html+=`<div class="qrow" style="border:1px dashed var(--amber);border-radius:6px;border-bottom:1px dashed var(--amber)">
+    <span class="qstat">⏸ held</span><span class="qwhat">the queue is paused — press Resume to keep printing</span></div>`;
+  if(st.bake&&st.bake.running)
+    html+=`<div class="qrow"><span class="qstat"><span class="warn">▶</span> baking</span>
+      <span class="qwhat"><b>render stale cards</b> — ${esc(title(st.bake.project))} · ${
+        st.bake.done} of ${st.bake.total}${st.bake.label
+        ?` — <span class="mut">${esc(st.bake.label)}</span>`:''}</span>
+      <button class="tiny" style="color:var(--red)"
+        onclick="event.stopPropagation();stopBake()"
+        title="let the card in flight finish, skip the rest">stop</button></div>`;
+  for(const j of running)html+=row(j,'<span class="warn">▶ now</span>');
+  queued.forEach((j,i)=>html+=row(j,`○ next ${i+1}`,
+    `<button class="tiny" onclick="event.stopPropagation();queueCancel('${j.id}')"
+      title="take it out of the line — nothing already rendered is touched">✕</button>`));
+  if(done.length){
+    html+=`<div class="mut" style="font-size:10.5px;margin:10px 0 2px;letter-spacing:.06em;text-transform:uppercase">finished</div>`;
+    for(const j of done)
+      html+=row(j,
+        j.status==='done'?`<span class="ok">✓</span> ${j.seconds!=null?j.seconds+'s':''}`
+        :j.status==='error'?'<span class="warn">✕ failed</span>':'⊘ taken out',
+        j.kind==='render'?`<button class="tiny" onclick="event.stopPropagation();queueRetry('${j.id}')"
+          title="render it again — it joins the back of the line">⟳</button>`:'')
+        +(j.status==='error'&&j.error?`<div class="mut" style="color:var(--red);font-size:11px;padding:2px 4px 6px 83px">${esc(j.error)}</div>`:'');
+  }
+  $('qclear').hidden=!done.length;
+  $('qlist').innerHTML=html
+    ||'nothing in line — renders, previews and paints queue up here';
+}
+async function queuePause(){
+  const r=await api('/api/queue/pause',{on:!(QDATA&&QDATA.paused)});
+  if(r.error)$('status').innerHTML=`<span class="warn">${esc(r.error)}</span>`;
+  kickQueue();
+}
+async function queueCancel(id){
+  const r=await api('/api/queue/cancel',{job:id});
+  if(r.error)$('status').innerHTML=`<span class="warn">${esc(r.error)}</span>`;
+  kickQueue(); pollJobs();       // the card's own button goes back to rest
+}
+async function queueRetry(id){
+  const r=await api('/api/queue/retry',{job:id});
+  if(r.error)$('status').innerHTML=`<span class="warn">${esc(r.error)}</span>`;
+  else $('status').textContent='queued again — at the back of the line';
+  kickQueue(); pollJobs();
+}
+async function queueClear(){ await api('/api/queue/clear'); kickQueue(); }
+function queueJump(id){
+  const el=$('c'+id); if(!el)return;
+  el.scrollIntoView({behavior:'smooth',block:'center'}); setCur(id);
+}
+pollQueue();
 // the profile panel used to stay empty until a document was opened, which made
 // the voices look like they belonged to the document rather than the library.
 // Settings first, and WAITED for: the Edit buttons on cards exist only if an

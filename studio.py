@@ -3498,23 +3498,60 @@ _jobs = {}
 _queue = __import__("collections").deque()
 _qlock = threading.Condition()
 _seq = [0]
+# the print queue's hold button: the worker stops POPPING, never mid-card —
+# a generate() on MPS cannot be interrupted without losing the model, so
+# pause is honoured between jobs, the same law bake's Stop already follows
+_qstate = {"paused": False}
 
 
-def enqueue(kind, project, cid, text=None):
+def enqueue(kind, project, cid, text=None, label=""):
     with _qlock:
         _seq[0] += 1
         jid = f"j{_seq[0]}"
         _jobs[jid] = {"id": jid, "kind": kind, "project": project, "chunk": cid,
-                      "status": "queued", "text": text, "queued_at": time.time()}
+                      "status": "queued", "text": text,
+                      "label": str(label or "")[:80], "queued_at": time.time()}
         _queue.append(jid)
         _qlock.notify()
     return jid
 
 
+def job_start(kind, project, cid, label=""):
+    """File already-RUNNING work in the jobs table so the queue window sees
+    it. Paints run in their request's own thread — parallel, unpausable,
+    answered on the connection that asked — so they never pass through
+    _queue; this is bookkeeping, not scheduling."""
+    with _qlock:
+        _seq[0] += 1
+        jid = f"j{_seq[0]}"
+        _jobs[jid] = {"id": jid, "kind": kind, "project": project, "chunk": cid,
+                      "status": "running", "label": str(label or "")[:80],
+                      "queued_at": time.time()}
+    return jid
+
+
+def job_end(jid, error=""):
+    j = _jobs.get(jid)
+    if j:
+        j.update(status="error" if error else "done",
+                 seconds=round(time.time() - j["queued_at"], 1))
+        if error:
+            j["error"] = error
+    _prune_jobs()
+
+
+def _prune_jobs():
+    # keep the table small; finished jobs are only needed until the UI polls
+    if len(_jobs) > 400:
+        for k in sorted(_jobs, key=lambda k: _jobs[k]["queued_at"])[:200]:
+            if _jobs[k]["status"] in ("done", "error", "canceled"):
+                _jobs.pop(k, None)
+
+
 def worker():
     while True:
         with _qlock:
-            while not _queue:
+            while not _queue or _qstate["paused"]:
                 _qlock.wait()
             jid = _queue.popleft()
         j = _jobs[jid]
@@ -3532,11 +3569,7 @@ def worker():
             j.update(status="done", seconds=round(time.time() - t0, 1))
         except Exception as ex:
             j.update(status="error", error=f"{type(ex).__name__}: {ex}")
-        # keep the table small; finished jobs are only needed until the UI polls
-        if len(_jobs) > 400:
-            for k in sorted(_jobs, key=lambda k: _jobs[k]["queued_at"])[:200]:
-                if _jobs[k]["status"] in ("done", "error"):
-                    _jobs.pop(k, None)
+        _prune_jobs()
 
 
 threading.Thread(target=worker, daemon=True).start()
@@ -3556,6 +3589,10 @@ def bake(name):
     fails = []
     try:
         for c in todo:
+            # the queue's Pause holds these presses too — between cards,
+            # never mid-card, the same law as Stop
+            while _qstate["paused"] and not _bake["cancel"]:
+                time.sleep(0.3)
             if _bake["cancel"]:
                 _bake["stopped"] = True
                 break
@@ -4930,6 +4967,18 @@ class H(BaseHTTPRequestHandler):
             return self._send(200, {"jobs": js[-60:],
                                     "busy": sum(1 for j in js
                                                 if j["status"] in ("queued", "running"))})
+        if u.path == "/api/queue":
+            # the printer-queue window: every job in the table, every
+            # project — /api/jobs narrows to one document for the card
+            # buttons, this answers for the whole studio
+            with _qlock:
+                js = [dict(j) for j in _jobs.values()]
+                paused = _qstate["paused"]
+            js.sort(key=lambda j: j["queued_at"])
+            return self._send(200, {
+                "jobs": js[-80:], "paused": paused, "bake": _bake,
+                "busy": sum(1 for j in js
+                            if j["status"] in ("queued", "running"))})
 
         if u.path == "/api/audio":
             f = AUDIO / f"{q.get('h',[''])[0]}.wav"
@@ -5412,6 +5461,8 @@ class H(BaseHTTPRequestHandler):
                           None) if doc else None)
                 if doc and not (c or {}).get("nostyle"):
                     style = style_of(doc)
+            jid = job_start("paint", nm, d.get("id"),
+                            str(d.get("prompt") or ""))
             try:
                 mname = generate_media(str(d.get("prompt") or ""),
                                        str(d.get("media") or ""),
@@ -5420,7 +5471,9 @@ class H(BaseHTTPRequestHandler):
                                        style,
                                        str(d.get("vary") or ""))
             except (ValueError, RuntimeError) as ex:
+                job_end(jid, error=str(ex))
                 return self._send(400, {"error": str(ex)})
+            job_end(jid)
             return self._send(200, {"ok": True, "media": mname,
                                     "kind": "image"})
         # A darkride source link, imported without the browser detour: the
@@ -6557,13 +6610,50 @@ class H(BaseHTTPRequestHandler):
                 return self._send(200, {"ok": True})
             if u.path == "/api/render":
                 return self._send(200, {"ok": True,
-                                        "job": enqueue("render", d["name"], d["id"])})
+                                        "job": enqueue("render", d["name"], d["id"],
+                                                       label=d.get("label"))})
             if u.path == "/api/preview":
                 sel = (d.get("text") or "").strip()
                 if not sel:
                     return self._send(400, {"error": "select some text in the card first"})
                 return self._send(200, {"ok": True,
-                                        "job": enqueue("preview", d["name"], d["id"], sel)})
+                                        "job": enqueue("preview", d["name"], d["id"], sel,
+                                                       label=sel)})
+            # ── the queue's own verbs ── pause holds the presses between
+            # jobs (never mid-card, see _qstate); cancel takes a WAITING job
+            # out of the line; retry sends a finished render to the back of
+            # it. Refusals are 200 {ok:False} like /api/bake's, not errors:
+            # racing the worker is normal, not exceptional.
+            if u.path == "/api/queue/pause":
+                with _qlock:
+                    _qstate["paused"] = bool(d.get("on"))
+                    _qlock.notify_all()
+                return self._send(200, {"ok": True, "paused": _qstate["paused"]})
+            if u.path == "/api/queue/cancel":
+                with _qlock:
+                    j = _jobs.get(str(d.get("job") or ""))
+                    if not j or j["status"] != "queued":
+                        return self._send(200, {"ok": False, "error":
+                            "only a job still waiting can be taken out — "
+                            "one mid-render finishes on its own"})
+                    _queue.remove(j["id"])
+                    j["status"] = "canceled"
+                return self._send(200, {"ok": True})
+            if u.path == "/api/queue/retry":
+                j = _jobs.get(str(d.get("job") or ""))
+                if not j or j["kind"] != "render" \
+                        or j["status"] not in ("done", "error", "canceled"):
+                    return self._send(200, {"ok": False, "error":
+                        "only a finished render can go again"})
+                return self._send(200, {"ok": True,
+                    "job": enqueue("render", j["project"], j["chunk"],
+                                   label=j.get("label"))})
+            if u.path == "/api/queue/clear":
+                with _qlock:
+                    for k in [k for k, j in _jobs.items()
+                              if j["status"] in ("done", "error", "canceled")]:
+                        _jobs.pop(k)
+                return self._send(200, {"ok": True})
 
 
             if u.path == "/api/bake":
@@ -7030,6 +7120,9 @@ class H(BaseHTTPRequestHandler):
             if u.path == "/api/cast/paint":
                 # slow and lockless, like /api/media/generate — cast_paint
                 # takes the lock itself for the one registry append at the end
+                jid = job_start("paint", "", None,
+                                f"@{d.get('slug') or ''} · "
+                                f"{str(d.get('prompt') or '')}")
                 try:
                     fname = cast_paint(str(d.get("slug") or ""),
                                        str(d.get("prompt") or ""),
@@ -7037,7 +7130,9 @@ class H(BaseHTTPRequestHandler):
                                        str(d.get("stem") or ""),
                                        str(d.get("file") or ""))
                 except (ValueError, RuntimeError) as ex:
+                    job_end(jid, error=str(ex))
                     return self._send(400, {"error": str(ex)})
+                job_end(jid)
                 return self._send(200, {"ok": True, "file": fname})
             if u.path == "/api/media/open":
                 # any pool picture or film, in whatever this machine opens
