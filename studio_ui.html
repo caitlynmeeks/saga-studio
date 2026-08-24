@@ -2482,10 +2482,11 @@ function seriesMenu(e,slug){
       ctxAsk(s.title,'series title','rename',t=>editSeries(slug,{title:t})); }},
     // what this shelf calls itself, and what it calls its parts. Only labels,
     // but they are the labels darkride will print: a serial has episodes, a
-    // collection has poems, and neither wants the other's word.
-    {label:`Call it a “${s.noun}”…`, run:()=>{ openCtx(e,[]);
+    // collection has poems, and neither wants the other's word. Terse on
+    // purpose: the sentence-shaped versions read as annotations, not buttons.
+    {label:`Noun: “${s.noun}”…`, run:()=>{ openCtx(e,[]);
       ctxAsk(s.noun,'serial · collection · book','set',v=>editSeries(slug,{noun:v})); }},
-    {label:`Its parts are “${s.member}s”…`, run:()=>{ openCtx(e,[]);
+    {label:`Parts: “${s.member}s”…`, run:()=>{ openCtx(e,[]);
       ctxAsk(s.member,'episode · chapter · poem','set',v=>editSeries(slug,{member:v})); }},
     {label:'Picture Style…', run:()=>seriesStyleAsk(e,slug)},
     '-',
