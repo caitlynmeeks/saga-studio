@@ -1105,7 +1105,7 @@ def _paint_image(text, aspect, refs):
     return _paint_nanobanana(text, aspect, refs, st["key"] or gemini_key())
 
 
-def cast_paint(slug, prompt, plate="", stem=""):
+def cast_paint(slug, prompt, plate="", stem="", file=""):
     """Paint inside the board (CAST.md §7d): the member's own plates as
     references — the selected plate first, so a local painter's canvas is
     the one being varied, then the key — and its brief as words, assembled
@@ -1114,7 +1114,12 @@ def cast_paint(slug, prompt, plate="", stem=""):
     from. What comes back lands as a CANDIDATE in the member's folder,
     never a plate: canon is chosen, not accumulated (§7c). A member with no
     plates yet paints from the brief alone — that is how one is
-    bootstrapped from nothing. Returns the candidate's file name."""
+    bootstrapped from nothing.
+
+    `file` targets a CANDIDATE instead, and then the candidate is the only
+    picture sent: pulling the key in beside it would drag the paint back
+    toward the very look the candidate may be escaping. Returns the new
+    candidate's file name."""
     if not prompt.strip():
         raise ValueError("an empty prompt paints nothing")
     m = cast().get(slug)
@@ -1123,13 +1128,23 @@ def cast_paint(slug, prompt, plate="", stem=""):
     plates = m.get("plates") or {}
     if plate and plate not in plates:
         raise ValueError(f'no plate "{plate}" to paint against')
-    refs = []
-    if plate:
-        refs.append(f"@{slug}/{plate}")
-    if plates:
-        k = m.get("key") or next(iter(plates))
-        if k != plate:
-            refs.append(f"@{slug}/{k}")
+    rr, refs = [], []
+    if file:
+        if file not in (m.get("candidates") or []):
+            raise ValueError("no such candidate to paint against")
+        cf = CAST / slug / file
+        if not cf.is_file():
+            raise ValueError("the candidate's file is missing from disk")
+        kind = (m.get("kind") or "reference").capitalize()
+        rr.append((cf, f'{kind} reference ({m.get("title") or slug}, '
+                       'candidate)'))
+    else:
+        if plate:
+            refs.append(f"@{slug}/{plate}")
+        if plates:
+            k = m.get("key") or next(iter(plates))
+            if k != plate:
+                refs.append(f"@{slug}/{k}")
     # §7d in full: the collection's style rides too, named by the member's
     # own scope — the board still reads no DOC. Without this, a member's
     # FIRST plate is painted with no Style line at all, comes out in the
@@ -1141,7 +1156,7 @@ def cast_paint(slug, prompt, plate="", stem=""):
     for r in ref_list(st.get("refs")):
         if r not in refs:
             refs.append(r)
-    rr = [resolve_ref(r) for r in refs]
+    rr += [resolve_ref(r) for r in refs]
     text = _labelled_prompt(prompt,
                             ([{"kind": "style", "brief": stext}] if stext
                              else []) + [m])
@@ -5618,6 +5633,7 @@ class H(BaseHTTPRequestHandler):
         lock = None if u.path in ("/api/chat", "/api/assemble", "/api/book_preview",
                                   "/api/reveal", "/api/open_link",
                                   "/api/cast/reveal", "/api/cast/open",
+                                  "/api/media/open",
                                   # a painting takes ~15s and must not block
                                   # typing; its one registry write takes the
                                   # lock inside cast_paint
@@ -6903,11 +6919,24 @@ class H(BaseHTTPRequestHandler):
                 if not slot:
                     return self._send(400, {"error": "a slot name is needed"})
                 plates = m.setdefault("plates", {})
-                if slot in plates:
+                if slot in plates and not d.get("replace"):
+                    # occupied — the caller asks the author and comes back
+                    # with replace:true, never overwriting on a name clash
                     return self._send(400, {"error": f'"{slot}" is already '
-                                            "a slot here"})
-                plates[slot] = {"file": f}
+                                            "a slot here — accepting again "
+                                            "replaces its picture"})
                 cand.remove(f)
+                if slot in plates:
+                    # the slot keeps its name, its look and view, and every
+                    # stored ref pointing at it; only the art changes. The
+                    # old picture steps down into the candidates row — the
+                    # never-delete law, walked backwards.
+                    old = plates[slot].get("file")
+                    if old and old != f and old not in cand:
+                        cand.append(old)
+                    plates[slot]["file"] = f
+                else:
+                    plates[slot] = {"file": f}
                 if not cand:
                     m.pop("candidates", None)
                 if d.get("key") or not m.get("key"):
@@ -6993,10 +7022,25 @@ class H(BaseHTTPRequestHandler):
                     fname = cast_paint(str(d.get("slug") or ""),
                                        str(d.get("prompt") or ""),
                                        str(d.get("plate") or ""),
-                                       str(d.get("stem") or ""))
+                                       str(d.get("stem") or ""),
+                                       str(d.get("file") or ""))
                 except (ValueError, RuntimeError) as ex:
                     return self._send(400, {"error": str(ex)})
                 return self._send(200, {"ok": True, "file": fname})
+            if u.path == "/api/media/open":
+                # any pool picture or film, in whatever this machine opens
+                # it with — the viewer gesture the cast board taught, now
+                # answering for the pool and the visual cards too. The path
+                # is built from the pool name, never from the request.
+                nm = re.sub(r"[^a-z0-9_-]", "", str(d.get("media") or ""))
+                try:
+                    f = media_file(nm) if nm else None
+                except FileNotFoundError:
+                    f = None
+                if f is None:
+                    return self._send(404, {"error": f'no media "{nm}"'})
+                subprocess.run([OPEN_CMD, str(f)], check=False)
+                return self._send(200, {"ok": True})
             if u.path == "/api/cast/reveal":
                 # the member's folder in Finder — where its plates live, and
                 # the honest answer to "where did my picture go"

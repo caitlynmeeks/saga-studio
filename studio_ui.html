@@ -2805,6 +2805,7 @@ function mediaMenu(e,i){
   const used=(STATE.media_counts||{})[m.name]||0;
   const mk=m.kind==='video'?'video':'image', eapp=appFor(mk);
   openCtx(e,[
+    {label:'Open in your Viewer', run:()=>api('/api/media/open',{media:m.name})},
     ...(eapp?[{label:'Edit in '+appLabel(eapp),
       run:()=>editExternal(mk,m.name)}]:[]),
     {label:'Rename…', run:()=>{ openCtx(e,[]);
@@ -2898,6 +2899,7 @@ let CASTSEL=null;                 // whose board the deck is wearing
 let DRAGPLATE=null;               // a plate mid-reorder, so file drops stand aside
 let DRAGCAST=null;                // a member mid-drag towards a visual card
 let PAINTTGT='';                  // the plate the board's Paint varies, '' = the key
+let PAINTCAND='';                 // or a candidate file to vary — never both
 let BOARDPAINTING=false;          // one candidate at a time; the button says so
 // §7d: prompts that paint well, kept as buttons because the phrasing matters
 // and should not have to be remembered. [label, file stem, the prompt]
@@ -3094,7 +3096,7 @@ async function createMember(){
 // ── the board ── it swaps in for the deck; body.dataset.mode carries it
 function openBoard(slug){
   if(CASTSEL!==slug){         // another member is another painting session
-    PAINTTGT='';
+    PAINTTGT=''; PAINTCAND='';
     const cp=$('cpaint'); if(cp)cp.value='';
   }
   CASTSEL=slug;
@@ -3121,6 +3123,7 @@ function renderBoard(force){
     if(el&&bd.contains(el)&&/^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName))return;
   }
   if(PAINTTGT&&!(m.plates||{})[PAINTTGT])PAINTTGT='';
+  if(PAINTCAND&&!(m.candidates||[]).includes(PAINTCAND))PAINTCAND='';
   // a rebuild must not eat a half-typed paint prompt (a fresh board never
   // inherits one: openBoard clears the box on a member switch)
   const oldPrompt=($('cpaint')||{}).value||'';
@@ -3199,7 +3202,8 @@ function renderBoard(force){
   const nb=!!STATE.nanobanana, some=!!Object.keys(m.plates||{}).length;
   html+=`<div style="display:flex;gap:6px;margin-top:16px;align-items:start">
     <textarea id="cpaint" rows="2" style="flex:1;resize:vertical;min-height:38px"
-      placeholder="${nb?'paint a candidate — the '+(some?(PAINTTGT?PAINTTGT:'key')+' plate and the brief ride':'brief rides')+' along; every press is a few cents and ~15s'
+      placeholder="${nb?'paint a candidate — '+(PAINTCAND?'that candidate and the brief ride'
+        :some?'the '+(PAINTTGT||'key')+' plate and the brief ride':'the brief rides')+' along; every press is a few cents and ~15s'
         :'painting needs an image provider — a Gemini key or Draw Things, in ⚙ Settings'}"
       onkeydown="if(event.key==='Enter'&&(event.metaKey||event.ctrlKey))boardPaint(this.value,'candidate')"></textarea>
     <button id="cpb" class="pri" ${nb&&!BOARDPAINTING?'':'disabled'}
@@ -3208,6 +3212,8 @@ function renderBoard(force){
   <div style="display:flex;gap:5px;margin-top:5px;align-items:center;flex-wrap:wrap">
     ${PAINTTGT?`<button class="tiny" onclick="PAINTTGT='';renderBoard(true)"
       title="painting against @${CASTSEL}/${PAINTTGT} — click to go back to painting against the key">against: ${esc(PAINTTGT)} ✕</button>`:''}
+    ${PAINTCAND?`<button class="tiny" onclick="PAINTCAND='';renderBoard(true)"
+      title="painting against this candidate ALONE — the key stays out of it, so the paint is not dragged back toward the look the candidate may be escaping. Click to go back to the key.">against candidate: ${esc(PAINTCAND.replace(/\.[a-z0-9]+$/,''))} ✕</button>`:''}
     ${CASTPRESETS.map((p,i)=>`<button class="tiny" ${nb&&some&&!BOARDPAINTING?'':'disabled'}
       onclick="boardPaint(CASTPRESETS[${i}][2],CASTPRESETS[${i}][1])"
       title="${aq(p[2])}">${esc(p[0])}</button>`).join('')}
@@ -3319,7 +3325,7 @@ function plateMenu(e,slot){
       run:()=>castApi('/api/cast/plate/edit',{slug:CASTSEL,plate:slot,look:'',view:''})}]:[]),
     '-',
     {label:'Paint a Variant of This One…', run:()=>{
-      PAINTTGT=slot; renderBoard(true);
+      PAINTTGT=slot; PAINTCAND=''; renderBoard(true);
       const cp=$('cpaint'); if(cp)cp.focus();
       $('status').textContent=`painting against @${CASTSEL}/${slot} — write the prompt and press Paint`;
     }},
@@ -3359,11 +3365,15 @@ function candMenu(e,f){
   openCtx(e,[
     {label:'Accept into a Slot…', run:()=>{ openCtx(e,[]);
       ctxAsk(sug,'slot name — sheet, 3q, angry…','accept',
-        t=>castApi('/api/cast/accept',{slug:CASTSEL,file:f,plate:t})); }},
+        t=>acceptCand(f,t,false)); }},
     {label:'Accept as the Key Plate…', run:()=>{ openCtx(e,[]);
-      ctxAsk(sug,'slot name','accept ★',
-        t=>castApi('/api/cast/accept',{slug:CASTSEL,file:f,plate:t,key:true})); }},
+      ctxAsk(sug,'slot name','accept ★', t=>acceptCand(f,t,true)); }},
     '-',
+    {label:'Paint a Variant of This One…', run:()=>{
+      PAINTCAND=f; PAINTTGT=''; renderBoard(true);
+      const cp=$('cpaint'); if(cp)cp.focus();
+      $('status').textContent=`painting against the candidate “${f}” alone — write the prompt and press Paint`;
+    }},
     {label:'Open in your Viewer',
      run:()=>castApi('/api/cast/open',{slug:CASTSEL,file:f},true)},
     '-',
@@ -3371,6 +3381,24 @@ function candMenu(e,f){
     {label:'Drop from the Row', danger:true,
      run:()=>castApi('/api/cast/candidate/drop',{slug:CASTSEL,file:f})},
   ]);
+}
+// accepting into an OCCUPIED slot is the repaint gesture: the slot keeps its
+// name, labels and every ref pointing at it, only the art changes, and the
+// old picture steps down into the candidates. Asked out loud first — the
+// server refuses the collision unless told replace, so nothing can be
+// clobbered by a name clash that nobody noticed.
+async function acceptCand(f,t,key){
+  const m=(STATE.cast||{})[CASTSEL]; if(!m)return;
+  const slot=String(t||'').toLowerCase().replace(/[^a-z0-9_-]+/g,'-')
+    .replace(/^-+|-+$/g,'').slice(0,40);
+  if(!slot)return;
+  const taken=!!(m.plates||{})[slot];
+  if(taken&&!confirm(`“${slot}” already holds a plate.\n\nReplace its picture with this candidate? The slot keeps its name, look and every ref pointing at it — the old picture steps down into the candidates row.`))return;
+  const r=await castApi('/api/cast/accept',
+    {slug:CASTSEL,file:f,plate:slot,key,replace:taken});
+  if(r)$('status').innerHTML=`<span class="ok">“${esc(slot)}” ${
+    taken?'repainted — the old picture waits in the candidates':'accepted'}</span>${
+    key?' — and it is the key ★':''}`;
 }
 async function boardPaint(prompt,stem){
   if(!CASTSEL||BOARDPAINTING)return;
@@ -3384,7 +3412,8 @@ async function boardPaint(prompt,stem){
   BOARDPAINTING=true;
   const b=$('cpb'); if(b){ b.disabled=true; b.textContent='painting…'; }
   $('status').textContent='painting a candidate — about 15 seconds';
-  let r; try{ r=await api('/api/cast/paint',{slug,prompt,plate:PAINTTGT,stem:stem||'candidate'}); }
+  let r; try{ r=await api('/api/cast/paint',{slug,prompt,plate:PAINTTGT,
+    file:PAINTCAND,stem:stem||'candidate'}); }
   catch(ex){ r={error:String(ex)}; }
   BOARDPAINTING=false;
   if(r.error){
@@ -3679,6 +3708,22 @@ document.addEventListener('contextmenu',e=>{
   const top=e.target.closest('#main .chunk > .top'); if(!top)return;
   const card=top.closest('.chunk');
   cardMenu(e,+card.id.slice(1));
+});
+// The picture on a visual card answers a right-click of its own: the viewer
+// gesture the cast board taught, now app-wide. Stills only — a film keeps
+// the browser's native menu, which carries its playback controls.
+document.addEventListener('contextmenu',e=>{
+  if(e.target.tagName!=='IMG')return;
+  const el=e.target.closest('#main .chunk'); if(!el)return;
+  const c=DOC&&DOC.chunks.find(x=>x.id===+el.id.slice(1));
+  if(!c||c.type!=='visual'||!c.media)return;
+  const eapp=appFor('image');
+  openCtx(e,[
+    {label:'Open in your Viewer', run:()=>api('/api/media/open',{media:c.media})},
+    ...(eapp?[{label:'Edit in '+appLabel(eapp),
+      run:()=>editExternal('image',c.media)}]:[]),
+    {label:`→ make “${c.media}” a reference…`, run:()=>promotePicker(e,c.media)},
+  ]);
 });
 function cardMenu(e,id){
   const c=DOC&&DOC.chunks.find(x=>x.id===id); if(!c)return;
