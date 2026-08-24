@@ -6647,7 +6647,7 @@ class H(BaseHTTPRequestHandler):
                 recs = series()
                 rec = recs.get(d.get("slug") or "")
                 if rec is None:
-                    return self._send(404, {"error": "no such series"})
+                    return self._send(404, {"error": "no such collection"})
                 for k, cap in (("title", 80), ("noun", 24), ("member", 24),
                                ("blurb", 500), ("cover", 120)):
                     if k not in d:
@@ -6676,14 +6676,14 @@ class H(BaseHTTPRequestHandler):
                 # series.json is even opened.
                 recs = series()
                 if recs.pop(d.get("slug") or "", None) is None:
-                    return self._send(404, {"error": "no such series"})
+                    return self._send(404, {"error": "no such collection"})
                 save_series(recs)
                 return self._send(200, {"ok": True})
             if u.path == "/api/series/assign":
                 try:
                     series_assign(d["name"], d.get("to") or None, d.get("at"))
                 except KeyError:
-                    return self._send(404, {"error": "no such series"})
+                    return self._send(404, {"error": "no such collection"})
                 return self._send(200, {"ok": True})
 
             # ── the cast ── every verb here writes cast.json alone (an

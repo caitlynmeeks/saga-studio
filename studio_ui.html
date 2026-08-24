@@ -364,7 +364,11 @@ background:#14120d;cursor:grab;font-size:12px}
 .gfold,.ins.gfold{display:none}
 .cardname{color:var(--bright);overflow:hidden;text-overflow:ellipsis;
 white-space:nowrap;max-width:42ch}
-button.tiny{padding:0 5px;font-size:12px;line-height:17px;border-color:transparent;color:var(--faint)}
+/* resting tiny buttons used to wear --faint with no border — the disabled
+   costume — and were read as greyed out. --dim text and a quiet standing
+   border keep them modest but legibly PRESSABLE; --faint now means only
+   "actually disabled". */
+button.tiny{padding:0 5px;font-size:12px;line-height:17px;border-color:var(--line);color:var(--dim)}
 .proj:hover button.tiny{border-color:var(--line)}
 /* same bargain in a card header: invisible until the card is under the mouse,
    so the row reads as text and not as a strip of controls */
@@ -417,7 +421,7 @@ width:13px;height:13px;border-radius:50%;background:var(--green);border:none;mar
 border-radius:50%;background:var(--green);border:none;cursor:ew-resize}
 /* the two orders a list can be in */
 .sortbar{display:flex;gap:3px;justify-content:flex-end;margin-bottom:6px}
-.sortbar button{border:0;background:none;color:var(--faint);font-size:10.5px;
+.sortbar button{border:0;background:none;color:var(--dim);font-size:10.5px;
 padding:1px 6px;border-radius:99px}
 .sortbar button:hover{color:var(--fg)}
 .sortbar button.on{background:var(--chrome);color:var(--bright)}
@@ -513,7 +517,7 @@ body:not([data-tab=chat]) .dchk,body[data-panel=off] .dchk{display:none}
 .take{display:inline-flex;align-items:center;gap:2px;border:1px solid var(--line);
   border-radius:5px;padding:0 2px;margin-left:2px}
 .take .n{font-size:10.5px;color:var(--dim);padding:0 2px;min-width:44px;text-align:center}
-.take button{border:0;padding:0 4px;line-height:17px;font-size:12px;color:var(--faint);background:none}
+.take button{border:0;padding:0 4px;line-height:17px;font-size:12px;color:var(--dim);background:none}
 .take button:hover:not(:disabled){color:var(--green)}
 /* the stage's engine room: the embedded player, mounted but never shown —
    it owns the sound (same-origin autoplay); the visible stage is a window */
@@ -537,7 +541,7 @@ color:var(--faint);margin:0 0 9px;font-weight:600}
 <header>
   <b>SAGA STUDIO</b>
   <span class="mut" id="hdr">no project</span>
-  <button class="tiny" onclick="toggleStoryPanel()" title="story settings — title, typewriter, typing sound">⚙</button>
+  <button class="tiny" onclick="toggleStoryPanel()" title="stack settings — title, typewriter, typing sound, picture style">⚙</button>
   <span style="flex:1"></span>
   <span class="pill warn" id="busy"></span>
   <span class="pill" id="model">model: cold</span>
@@ -552,7 +556,7 @@ color:var(--faint);margin:0 0 9px;font-weight:600}
 </header>
 
 <div id="storypanel" hidden>
-  <h3>story settings</h3>
+  <h3>stack settings</h3>
   <div class="srow"><label>title</label>
     <input id="st_title" onchange="storyRename(this.value)"></div>
   <div class="srow"><label>typewriter</label>
@@ -569,17 +573,17 @@ color:var(--faint);margin:0 0 9px;font-weight:600}
   <div class="srow"><label>style refs</label>
     <input id="st_srefs" placeholder="@adventure-time/board … (space-separated)"
       onchange="storyStyleSave()"></div>
-  <div class="mut" style="font-size:10.5px;margin-bottom:8px">this story's tier of the
-    picture style. The shelf has its own tier underneath (right-click the shelf),
-    every visual card shows what it wears on its paint row, and any card can
-    switch style off there</div>
+  <div class="mut" style="font-size:10.5px;margin-bottom:8px">this stack's tier of the
+    picture style. Its collection has a tier underneath (right-click the
+    collection), every visual card shows what it wears on its paint row, and
+    any card can switch style off there</div>
   <div style="display:flex"><span style="flex:1"></span>
     <button class="tiny" onclick="toggleStoryPanel()">Close</button></div>
 </div>
 
 <aside>
  <div id="stabs">
-   <button id="sbStories" onclick="setSide('stories')">Stories</button>
+   <button id="sbStories" onclick="setSide('stories')">Stacks</button>
    <button id="sbVoices" onclick="setSide('voices')">Voices</button>
    <button id="sbClips" onclick="setSide('clips')">Media</button>
    <button id="sbCast" onclick="setSide('cast')">Cast</button>
@@ -588,18 +592,28 @@ color:var(--faint);margin:0 0 9px;font-weight:600}
      style="margin-left:auto;padding:3px 7px 5px">⚙</button>
  </div>
  <div class="pane" id="sideStories">
-  <h2>Stories</h2>
-  <button class="pri" onclick="newStoryPanel()" style="width:100%"
-    title="Start a story — empty, or from a markdown file">+ New Story</button>
+  <h2>Stacks</h2>
+  <!-- a stack is a stack of cards, HyperCard's own word for it; a collection
+       keeps stacks in reading order. Two peer verbs, side by side — the
+       collection maker used to hide in the sort bar dressed as a view
+       control, and read as disabled. -->
+  <div style="display:flex;gap:5px">
+    <button class="pri" onclick="newStoryPanel()" style="flex:1"
+      title="Start a stack — empty, or from a markdown file">+ New Stack</button>
+    <button onclick="newSeries(event)"
+      title="a collection to keep stacks in. The order you put them in is the order they are read.">+ Collection</button>
+  </div>
   <div id="newstory" hidden style="margin-top:8px;border:1px solid var(--line);border-radius:7px;padding:10px">
-    <input id="ns_title" placeholder="Story title…" style="width:100%"
+    <input id="ns_title" placeholder="Stack title…" style="width:100%"
       onkeydown="if(event.key==='Enter')createStory()">
-    <button class="pri" onclick="createStory()" style="width:100%;margin-top:6px">Create Empty Story</button>
+    <label class="stlab">into
+      <select id="ns_into"></select></label>
+    <button class="pri" onclick="createStory()" style="width:100%;margin-top:6px">Create Empty Stack</button>
     <div class="mut" style="text-align:center;margin:6px 0;font-size:11px">— or —</div>
     <div id="drop">Drop .md or .sagaproj here<br><span style="font-size:11px">or click to choose</span></div>
   </div>
   <input type="file" id="file" accept=".md,.markdown,.txt,.sagaproj" multiple hidden>
-  <input class="qry" id="qprojects" placeholder="filter stories…"
+  <input class="qry" id="qprojects" placeholder="filter stacks…"
     style="margin-top:12px" oninput="setQry('projects')">
   <div id="projsort"></div>
   <div id="projects"></div>
@@ -699,7 +713,7 @@ color:var(--faint);margin:0 0 9px;font-weight:600}
     style="margin-top:12px" oninput="setQry('cast')">
   <label class="mut" style="font-size:11px;display:block;margin:4px 0 6px"
     title="a member's scope decides where it is SHOWN, never which one a ref finds">
-    <input type="checkbox" id="castall" onchange="renderCast()"> every scope, not just this shelf's</label>
+    <input type="checkbox" id="castall" onchange="renderCast()"> every scope, not just this collection's</label>
   <div id="cast"></div>
  </div>
 
@@ -1203,11 +1217,9 @@ async function refresh(){
   if(STATE.omnivoice&&!LANGS)
     loadLangs().then(()=>{ if(EDITING)renderProfiles(); });
   if(!PLUGINS)loadPlugins().then(()=>{ if(EDITING)renderProfiles(); });
-  // the shelf maker sits beside the sort buttons: making a series is a
-  // library-level verb, like sorting the library, not a per-story one
-  $('projsort').innerHTML=`<button class="tiny" onclick="newSeries(event)"
-      title="a shelf to keep stories on. The order you put them in is the order they are read."
-    >&#65291; Series</button>`+sortBar('projects','Recent');
+  // the collection maker moved up beside + New Stack — a peer verb, not a
+  // view control; this row keeps only the sorting of the unfiled half
+  $('projsort').innerHTML=sortBar('projects','Recent');
   paintProjects();
   if(document.body.dataset.side==='cast')renderCast();
   if(document.body.dataset.mode==='cast')renderBoard();
@@ -2355,7 +2367,7 @@ function projectList(){
     const fold=!!SFOLD[s.slug], n=s.order.length;
     h+=`<div class="sbar" data-slug="${s.slug}" onclick="foldSeries('${s.slug}')"
         oncontextmenu="seriesMenu(event,'${s.slug}')"
-        title="drag stories in and out. The order here is the order they are read.">
+        title="drag stacks in and out. The order here is the order they are read.">
       <span class="fold">${fold?'▸':'▾'}</span>
       <b>${esc(s.title)}</b>
       <span class="mut" style="font-size:11px">${n
@@ -2368,12 +2380,12 @@ function projectList(){
     // first story onto is a shelf you can never start.
     if(!fold)h+=`<div class="smem in" data-slug="${s.slug}">`+(n
       ?s.order.map((nm,i)=>projRow(by.get(nm),s.slug,i)).join('')
-      :`<div class="sdrop">drop a story here</div>`)+`</div>`;
+      :`<div class="sdrop">drop a stack here</div>`)+`</div>`;
   }
   // Unfiled announces itself only once there is something to be filed AGAINST
   if(ser.length)h+=`<div class="sbar unf" data-slug=""><b class="mut">Unfiled</b>
-    <span class="mut" style="font-size:11px">${loose.length} stor${
-      loose.length===1?'y':'ies'}</span></div>`;
+    <span class="mut" style="font-size:11px">${loose.length} stack${
+      loose.length===1?'':'s'}</span></div>`;
   // the sort buttons order this half; a shelf's order is the author's own
   h+=`<div class="smem" data-slug="">`+(sortedBy(loose,'projects','edited')
     .map(p=>projRow(p,'',-1)).join('')
@@ -2472,18 +2484,18 @@ async function assignSeries(name,to,at){
 }
 function newSeries(e){
   openCtx(e,[]);
-  ctxAsk('','series title, e.g. Saga','create',async t=>{
+  ctxAsk('','collection title, e.g. Saga','create',async t=>{
     const r=await api('/api/series/new',{title:t});
     if(r.error)return void($('status').innerHTML=`<span class="warn">${esc(r.error)}</span>`);
     await refresh();
-    $('status').innerHTML=`<span class="ok">“${esc(t)}” is a series</span> — drag stories onto it`;
+    $('status').innerHTML=`<span class="ok">“${esc(t)}” is a collection</span> — drag stacks onto it, or start one with + New Stack`;
   });
 }
 function seriesMenu(e,slug){
   const s=(STATE.series||[]).find(x=>x.slug===slug); if(!s)return;
   openCtx(e,[
     {label:'Rename…', run:()=>{ openCtx(e,[]);
-      ctxAsk(s.title,'series title','rename',t=>editSeries(slug,{title:t})); }},
+      ctxAsk(s.title,'collection title','rename',t=>editSeries(slug,{title:t})); }},
     // what this shelf calls itself, and what it calls its parts. Only labels,
     // but they are the labels darkride will print: a serial has episodes, a
     // collection has poems, and neither wants the other's word. Terse on
@@ -2496,7 +2508,7 @@ function seriesMenu(e,slug){
     '-',
     {label:'Export…', run:()=>exportSeries(slug)},
     '-',
-    {label:'Delete series…', danger:true, run:()=>deleteSeries(slug)},
+    {label:'Delete collection…', danger:true, run:()=>deleteSeries(slug)},
   ]);
 }
 async function editSeries(slug,fields){
@@ -2512,7 +2524,7 @@ function seriesStyleAsk(e,slug){
   const st=s.style||{};
   openCtx(e,[]); if(!CTX)return;
   CTX.innerHTML=`<div class="ctxask" style="flex-direction:column;align-items:stretch;min-width:300px">
-    <div class="mut" style="font-size:11px">the shelf's picture style — every ${esc(s.member)}'s paints lead with it; clear both fields to remove it</div>
+    <div class="mut" style="font-size:11px">the collection's picture style — every ${esc(s.member)}'s paints lead with it; clear both fields to remove it</div>
     <input id="ss_tx" value="${attr(st.text||'')}" placeholder="words — flat vector, thick even line, cel shading…">
     <input id="ss_rf" value="${attr((st.refs||[]).join(' '))}" placeholder="refs — @adventure-time/board … (space-separated)">
     <button class="pri">set</button></div>`;
@@ -2523,8 +2535,8 @@ function seriesStyleAsk(e,slug){
     await editSeries(slug,{style:{text,refs}});
     if(DOC)open_(DOC.name,true);   // open paint rows redraw their style line
     $('status').innerHTML=(text||refs.length)
-      ?'<span class="ok">shelf style set</span> — its stories paint under it'
-      :'<span class="ok">shelf style cleared</span>';
+      ?'<span class="ok">collection style set</span> — its stacks paint under it'
+      :'<span class="ok">collection style cleared</span>';
   };
   CTX.querySelector('button.pri').onclick=go;
   ['ss_tx','ss_rf'].forEach(i=>$(i).onkeydown=ev=>{ ev.stopPropagation();
@@ -2535,12 +2547,12 @@ function seriesStyleAsk(e,slug){
 async function deleteSeries(slug){
   const s=(STATE.series||[]).find(x=>x.slug===slug); if(!s)return;
   const n=s.order.length;
-  if(!confirm(`Delete the series “${s.title}”?\n\nOnly the shelf goes. Its ${n} `+
+  if(!confirm(`Delete the collection “${s.title}”?\n\nOnly the collection goes. Its ${n} `+
     `${s.member}${n===1?'':'s'} are untouched and move to Unfiled.`))return;
   const r=await api('/api/series/delete',{slug});
   if(r.error)return void($('status').innerHTML=`<span class="warn">${esc(r.error)}</span>`);
   await refresh();
-  $('status').innerHTML=`<span class="ok">series “${esc(s.title)}” deleted</span> — its stories are in Unfiled`;
+  $('status').innerHTML=`<span class="ok">collection “${esc(s.title)}” deleted</span> — its stacks are in Unfiled`;
 }
 // One archive, every story on the shelf, in shelf order. plan_export has taken
 // a LIST of projects since the day it was written, so this is the same button
@@ -2548,7 +2560,7 @@ async function deleteSeries(slug){
 const exportSeries=slug=>{
   const s=(STATE.series||[]).find(x=>x.slug===slug);
   if(!s||!s.order.length)
-    return void($('status').innerHTML='<span class="warn">that series has no stories in it yet</span>');
+    return void($('status').innerHTML='<span class="warn">that collection has no stacks in it yet</span>');
   doExport(s.order.map(n=>'name='+encodeURIComponent(n)).join('&'));
 };
 
@@ -2829,7 +2841,7 @@ async function dropMediaAt(at,grp){
   document.body.dataset.dropclip='';
   if(!media)return;
   if(!DOC)return void($('status').innerHTML=
-    '<span class="warn">open an episode first</span> — a visual needs somewhere to land');
+    '<span class="warn">open a stack first</span> — a visual needs somewhere to land');
   await flushAll();
   const r=await api('/api/insert',{name:DOC.name,at,kind:'visual',group:grp||''});
   if(r.error)return void($('status').innerHTML=`<span class="warn">${esc(r.error)}</span>`);
@@ -3011,8 +3023,8 @@ function castDragStart(e,slug){
   }
   $('status').textContent=n
     ?`drop “@${slug}” on a lit visual card to paint against it`
-    :(DOC?'no visual cards in this episode — a reference lands on a visual card'
-         :'open an episode first — a reference needs a card to land on');
+    :(DOC?'no visual cards in this stack — a reference lands on a visual card'
+         :'open a stack first — a reference needs a card to land on');
 }
 function castDragEnd(){
   DRAGCAST=null;
@@ -3133,10 +3145,10 @@ function renderBoard(force){
       <label class="stlab" style="margin:0;flex:1;min-width:140px"
         title="where this member is SHOWN in the Cast tab — a ref finds it from anywhere either way">shown on
         <select onchange="castApi('/api/cast/edit',{slug:'${CASTSEL}',scope:this.value})">
-          <option value="">every shelf</option>
+          <option value="">every collection</option>
           ${shelves.map(s=>`<option value="${aq(s.slug)}" ${m.scope===s.slug?'selected':''}>${esc(s.title)}</option>`).join('')}
           ${m.scope&&!shelves.some(s=>s.slug===m.scope)
-            ?`<option value="${aq(m.scope)}" selected>${esc(m.scope)} (a shelf that has gone)</option>`:''}
+            ?`<option value="${aq(m.scope)}" selected>${esc(m.scope)} (a collection that has gone)</option>`:''}
         </select></label>
       ${engines.map(e=>`<label class="stlab" style="margin:0;flex:1;min-width:130px"
         title="a LINK to a voice profile — the profile stays what it is; the character just knows it">voice · ${esc(e)}
@@ -4541,11 +4553,11 @@ function paintRow(c){
   return `<div id="pr${c.id}">
     ${tiered?`<div class="arow" style="align-items:center">
       <span class="mut" style="font-size:10.5px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap${c.nostyle?';text-decoration:line-through;opacity:.6':''}"
-        title="the style this card paints under — the shelf's tier, then the story's (⚙ story settings). Words lead the prompt, refs ride with the card's own. Visible because silent words in a prompt being debugged cost afternoons.">style: ${
+        title="the style this card paints under — the collection's tier, then the stack's (⚙ stack settings). Words lead the prompt, refs ride with the card's own. Visible because silent words in a prompt being debugged cost afternoons.">style: ${
         esc(eff.texts.join(' · '))||'<i>references only</i>'}${
         eff.refs.length?' '+eff.refs.map(r=>'+'+esc(r)).join(' '):''}</span>
       <button class="tiny" onclick="setCard(${c.id},{nostyle:${c.nostyle?'false':'true'}},true)"
-        title="${c.nostyle?'dress this card in the shelf and story style again':'paint this card bare — no shelf or story style'}">${c.nostyle?'style off ✕':'styled ✓'}</button>
+        title="${c.nostyle?'dress this card in the collection and stack style again':'paint this card bare — no collection or stack style'}">${c.nostyle?'style off ✕':'styled ✓'}</button>
     </div>`:''}
     <div class="arow">
       <textarea id="vp${c.id}" rows="2" style="flex:1;resize:vertical;min-height:38px"
@@ -6246,8 +6258,8 @@ async function storyStyleSave(){
   $('st_srefs').value=((r.style||{}).refs||[]).join(' ');
   open_(DOC.name,true);            // open paint rows redraw their style line
   $('status').innerHTML=r.style
-    ?'<span class="ok">story style set</span> — every visual card paints under it unless its paint row opts out'
-    :'<span class="ok">story style cleared</span>';
+    ?'<span class="ok">stack style set</span> — every visual card paints under it unless its paint row opts out'
+    :'<span class="ok">stack style cleared</span>';
 }
 async function storySet(k,v){
   if(!DOC)return;
@@ -6266,20 +6278,33 @@ async function storyRename(t){
 // a story begins
 function newStoryPanel(){
   const p=$('newstory'); p.hidden=!p.hidden;
-  if(!p.hidden){ $('ns_title').value=''; $('ns_title').focus(); }
+  if(!p.hidden){
+    // born filed, by default: the collection of the open stack is
+    // preselected, and Unfiled stays one flick away — optional in law
+    const cur=castShelf();
+    $('ns_into').innerHTML='<option value="">no collection — Unfiled</option>'+
+      (STATE.series||[]).map(s=>`<option value="${aq(s.slug)}" ${
+        s.slug===cur?'selected':''}>${esc(s.title)}</option>`).join('');
+    if(!cur&&(STATE.series||[]).length===1)$('ns_into').value=STATE.series[0].slug;
+    $('ns_title').value=''; $('ns_title').focus();
+  }
 }
 async function createStory(){
   const t=$('ns_title').value.trim();
   if(!t)return void $('ns_title').focus();
   const slug=t.toLowerCase().replace(/[^a-z0-9_-]+/g,'-').slice(0,60);
   if((STATE.projects||[]).some(p=>p.name===slug))
-    return void($('status').innerHTML='<span class="warn">A story by that name is already here</span>');
+    return void($('status').innerHTML='<span class="warn">A stack by that name is already here</span>');
   const r=await api('/api/import',{title:t,markdown:''});
   if(r.error)return void($('status').innerHTML=`<span class="warn">${esc(r.error)}</span>`);
+  const into=$('ns_into').value;
+  if(into)await api('/api/series/assign',{name:r.name,to:into});
   $('newstory').hidden=true;
   await refresh();
   open_(r.name,true);
-  $('status').innerHTML=`<span class="ok">“${esc(t)}” begins</span> — build it from the + strips below`;
+  const s=(STATE.series||[]).find(x=>x.slug===into);
+  $('status').innerHTML=`<span class="ok">“${esc(t)}” begins</span>${
+    s?` on “${esc(s.title)}”`:''} — build it from the + strips below`;
 }
 // Keep the speaking card on screen — the whole point is that when you hear a
 // problem, the card is already in front of you. But do not haul the list about
