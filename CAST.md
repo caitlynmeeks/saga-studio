@@ -465,6 +465,23 @@ component standalone at `/cast` a small job rather than a rewrite, should the bo
 ever want to be its own window on a second display. The Stage already proves that
 path works.
 
+### 7h. Paint a Variant, on the card itself
+
+The board's anchored repaint (§7c, §7d), grown app-wide: **paint a variant of this
+one** on a visual card's picture — its right-click menu and the variants menu — arms
+the card's paint row to send the CURRENT picture as the FIRST reference, ahead of the
+card's own refs and the style tiers, behind a label saying it is the one being varied.
+First matters twice: Draw Things paints over the first reference, and nanobanana's
+gallery reads it as the canvas rather than advice. So a repaint keeps the picture it
+starts from and changes what the prompt asks, instead of wandering.
+
+The mode is sticky, like the board's target: each later paint varies whatever the card
+shows *then*, which is the refinement loop — paint, nudge the prompt, paint again,
+each pass anchored to the last. And it is visible, never silent (§5's rule): an
+`against: <name> ✕` chip in the paint row, the Paint button reading **Paint a
+Variant**, both gone when the chip is dismissed or the row closed — the mode cannot
+outlive its own visibility.
+
 ---
 
 ## 8. Export, archive, copy

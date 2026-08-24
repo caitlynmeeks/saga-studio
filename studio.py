@@ -1192,7 +1192,7 @@ def cast_paint(slug, prompt, plate="", stem="", file=""):
     return fname
 
 
-def generate_media(prompt, stem="", aspect="", ref="", style=None):
+def generate_media(prompt, stem="", aspect="", ref="", style=None, vary=""):
     """Ask the chosen illustrator for a picture and file it in the media pool.
 
     Every generation is new bytes, so the upload route's dedupe has nothing
@@ -1206,6 +1206,10 @@ def generate_media(prompt, stem="", aspect="", ref="", style=None):
     brief along as words — a picture and a sentence agreeing beat either
     alone. `style` is style_of's (texts, refs) — the tiers above the card,
     composed by the caller because only the caller knows the card said no.
+    `vary` names a pool picture to paint a VARIANT of: it rides FIRST —
+    the one canvas Draw Things paints over, the head of nanobanana's
+    gallery — behind a label saying it is the one being varied, so a
+    repaint keeps the picture it starts from instead of wandering.
     Returns the name the pool filed it under."""
     if not prompt.strip():
         raise ValueError("an empty prompt paints nothing")
@@ -1221,7 +1225,14 @@ def generate_media(prompt, stem="", aspect="", ref="", style=None):
         for r in ref_list(style[1]):
             if r not in items:
                 items.append(r)
+    vary = re.sub(r"[^a-z0-9_-]", "", str(vary or ""))
+    if vary:
+        items = [r for r in items if r != vary]
     refs = [resolve_ref(r) for r in items]
+    if vary:
+        refs.insert(0, (_ref_image(vary),
+                        "The picture being varied: keep everything "
+                        "the prompt does not change"))
     reg, members, seen = cast(), [], set()
     # the tiers' words arrive as style members, broadest first, so the
     # Style lines stand where §4 fixes them — before cast, setting, shot
@@ -5406,7 +5417,8 @@ class H(BaseHTTPRequestHandler):
                                        str(d.get("media") or ""),
                                        str(d.get("aspect") or ""),
                                        d.get("ref") or "",   # name or list
-                                       style)
+                                       style,
+                                       str(d.get("vary") or ""))
             except (ValueError, RuntimeError) as ex:
                 return self._send(400, {"error": str(ex)})
             return self._send(200, {"ok": True, "media": mname,
