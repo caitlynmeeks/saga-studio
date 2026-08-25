@@ -5347,8 +5347,7 @@ async function syncCards(){
     if(rb&&c.type==='voiced'&&!rb.classList.contains('busy'))
       rb.disabled=!!c.mute||!c.haveperf;
     paintCardHead(c.id);          // engine and “custom” follow a profile change
-    const tk=$('tk'+c.id); if(tk)tk.textContent=takeName(c.seed||0);
-    const tkb=$('tkb'+c.id); if(tkb)tkb.disabled=!(c.seed||0);
+    const tk=$('tk'+c.id); if(tk)tk.textContent='⟳'+(c.seed?' Take '+c.seed:'');
     // the history button grows with each render without waiting for a rebuild
     const hb=$('hb'+c.id);
     if(hb){ const hn=(c.hist||[]).length;
@@ -5385,20 +5384,17 @@ function paintUnrendered(){
 // instantly rather than being re-rendered.
 const takeName=n=>n?'Take '+n:'Original';
 function takeUi(c){
+  // The stepper and its dropdown retired 2026-08-25, Caity's call: the
+  // render history (N renders ▾) lists every reading with its words, take
+  // and delivery aboard, plays any of them from the cache and brings one
+  // back whole — everything the menu here did, with more aboard. Only the
+  // verb history cannot do survives: the fresh roll. takeMenu and friends
+  // stay below, hidden rather than deleted, until the new menu proves out.
   const n=c.seed||0;
-  // Both engines store each take under its own name, so stepping back always
-  // plays the reading you already heard. Only chatterbox can *reproduce* one:
-  // it pins the sampler to a seed, and OmniVoice has none to pin.
   const ov=((c.effective||{}).engine||'chatterbox')==='omnivoice';
-  return `<span class="take"
-      title="re-roll this card — same words, a different reading, without touching the text${
-        ov?'.\nOmniVoice: each take is kept, but re-rendering one will not reproduce it — there is no seed.':''}">
-    <button id="tkb${c.id}" onclick="takeStep(${c.id},-1)" ${n?'':'disabled'}
-      title="back to the previous kept take — instant if you have heard it before">◂</button>
-    <button class="n" id="tk${c.id}" onclick="takeMenu(event,${c.id})"
-      title="every reading this card has — click one to hear it, hide the ones that are off">${takeName(n)}</button>
-    <button onclick="takeStep(${c.id},1)" title="roll again: the same words, read differently">⟳</button>
-  </span>`;
+  return `<button id="tk${c.id}" onclick="takeStep(${c.id},1)"
+    title="roll again — the same words, a different reading. Every roll you render waits in the renders menu beside this${
+      ov?'.\nOmniVoice: each roll is kept, but re-rendering one will not reproduce it — there is no seed.':''}">⟳${n?' Take '+n:''}</button>`;
 }
 // The take menu: what the blind ◂ ⟳ stepper never showed. Every rendered
 // reading with its length, the current one marked; click one to hear it,
