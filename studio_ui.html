@@ -71,6 +71,16 @@ body[data-tab=queue] #queue{display:block}
 .qrow .qstat{flex:none;width:76px;color:var(--dim);font-size:11px}
 .qrow .qwhat{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;
   white-space:nowrap}
+.ctx.histpick{max-width:620px;max-height:420px;overflow-y:auto;padding:6px}
+.hrow{display:flex;gap:7px;align-items:center;padding:4px 6px;
+  border-radius:5px;font-size:12px;cursor:pointer}
+.hrow:hover{background:var(--panel);color:var(--bright)}
+.hrow .hwhat{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;
+  white-space:nowrap}
+/* inside the ctx shell, buttons are menu rows by default — the history
+   rows carry their own small ones, so give those back their button shape */
+.histpick .hrow button{display:inline-block;width:auto;flex:none;
+  border:1px solid var(--line);border-radius:4px;padding:1px 7px;font-size:11px}
 /* The centre column is one grid cell holding two stacked children: the
    find/replace bar and the scrolling card list. Left as siblings of <main>
    they became grid items of their own and shunted every later panel a
@@ -858,7 +868,7 @@ Selected cards go along as context.</div></div>
   </div>
  </div>
  <div id="queue" class="rpane">
-  <h2>The Print Queue</h2>
+  <h2>The Render Queue</h2>
   <div style="display:flex;gap:6px;margin:6px 0 10px;align-items:center">
     <button id="qpause" class="tiny" onclick="queuePause()"
       title="hold the queue — the card in flight finishes, the rest wait">⏸ Pause</button>
@@ -1527,7 +1537,7 @@ function profEditor(n){
     </div>
     ${sl('speed','speed',0,2,'0 leaves it to the model; 1 is its normal pace')}
     `:`
-    <div class="psec">delivery${qm('how the reading sounds — text cards only; ◎ voiced cards ignore these')}</div>
+    <div class="psec">delivery${qm('how the reading sounds — Text-to-Speech cards only; ◎ voiced cards ignore these')}</div>
     ${sl('cfg','pace',0,1,'lower is slower and more deliberate')}
     ${sl('exag','feeling',0,1.5,'how much colour goes into the reading')}
     ${sl('temp','steadiness',0.05,1.5,'higher wanders more; lower stays flat')}
@@ -4257,7 +4267,7 @@ function paintVFilter(){
 
 const insBar=at=>`<div class="ins">
     <button class="pb" onclick="pasteCard(${at},event)">+ Paste</button>
-    <button onclick="insertCard(${at},'speech',event)" title="insert an empty text card here">+ Text</button>
+    <button onclick="insertCard(${at},'speech',event)" title="insert an empty Text-to-Speech card here — written words, spoken by an engine">+ Text-to-Speech</button>
     <button onclick="insertCard(${at},'voiced',event)" title="insert a card spoken by you, in a character's voice">+ ◎ Voiced</button>
     <button onclick="insertCard(${at},'audio',event)" title="insert a music / sound-effect card here">+ ♪ Audio</button>
     <button onclick="insertCard(${at},'visual',event)" title="insert a picture or film — the stage shows it from here until the next visual">+ ⛶ Visual</button>
@@ -4387,6 +4397,7 @@ function speechCard(c){return `
       <button id="pv${c.id}" onclick="prev(${c.id})" disabled>Preview Selected</button>
       <button id="rb${c.id}" class="pri" onclick="one(${c.id})" ${c.mute?'disabled':''}>Render</button>
       ${takeUi(c)}
+      ${histBtn(c)}
       <button id="dv${c.id}" class="${Object.keys(c.params||{}).length?'dirty':''}"
         onclick="toggleDeliv(${c.id})"
         title="change the engine or the delivery for this one card only">Delivery</button>
@@ -4514,6 +4525,7 @@ function voicedCard(c){
       <button id="rb${c.id}" class="pri" onclick="one(${c.id})"
         ${c.mute||!c.haveperf?'disabled':''}>Render</button>
       ${takeUi(c)}
+      ${histBtn(c)}
       <button id="sub${c.id}" class="${((c.sub||'').trim()||c.chain)?'dirty':''}" onclick="toggleSub(${c.id})"
         title="a voiced card has no prose — this is what the stage shows while your performance plays">Subtitle</button>
       <button onclick="voiceFromCard(event,${c.id})" ${c.ready?'':'disabled'}
@@ -5337,6 +5349,10 @@ async function syncCards(){
     paintCardHead(c.id);          // engine and “custom” follow a profile change
     const tk=$('tk'+c.id); if(tk)tk.textContent=takeName(c.seed||0);
     const tkb=$('tkb'+c.id); if(tkb)tkb.disabled=!(c.seed||0);
+    // the history button grows with each render without waiting for a rebuild
+    const hb=$('hb'+c.id);
+    if(hb){ const hn=(c.hist||[]).length;
+      hb.hidden=!hn; hb.textContent=`${hn} render${hn===1?'':'s'} ▾`; }
     syncPrevBtn(c.id);
   }
   // #dl was the header's download link, retired when the publish tab took
@@ -5445,6 +5461,86 @@ async function takeHide(id,n,hide){
     if(hid.has(m)){ m=n+1; while(hid.has(m))m++; }
     await takeSet(id,m);
   }else await syncCards();
+}
+
+// ── render history ── the other axis from takes. A take re-rolls the same
+// reading; history spans every RESPELLING, engine switch and dial change
+// the card has been through — each render filed by the server with the
+// words as spelled for the model, the take, the profile and the composed
+// delivery that made it. The menu plays any of them straight from the
+// cache, and choosing one brings ALL of that back onto the card: same
+// state, same hash, so the old render plays again instead of being made
+// again. Pronunciation hunts stop being destructive: every "tay-dee"
+// variant she tried is one click away, with the delivery it wore.
+function histBtn(c){
+  const n=(c.hist||[]).length;
+  return `<button id="hb${c.id}" onclick="histMenu(event,${c.id})" ${n?'':'hidden'}
+    title="every render this card has made — words, take, engine and delivery. ▶ hears one; choosing one brings its words and delivery back onto the card.">${
+    n} render${n===1?'':'s'} ▾</button>`;
+}
+async function histMenu(e,id){
+  const c=DOC&&DOC.chunks.find(x=>x.id===id); if(!c)return;
+  await flush(id);
+  const r=await api('/api/history?name='+encodeURIComponent(DOC.name)+'&id='+id);
+  if(r.error)return void($('status').innerHTML=`<span class="warn">${esc(r.error)}</span>`);
+  openCtx(e,[]); if(!CTX)return;
+  CTX.classList.add('histpick');
+  const byh={}; for(const en of r.hist||[])byh[en.h]=en;
+  const rows=(r.hist||[]).slice().reverse().map(en=>{
+    const cur=en.h===r.current, d=en.d||{};
+    const who=d.engine==='kokoro'?(d.kvoice||'kokoro'):(en.profile||'');
+    const words=(en.text||'').replace(/\s+/g,' ').trim();
+    return `<div class="hrow" data-h="${en.h}"
+      title="${aq(words||'a voiced performance')} — click to bring this render back onto the card">
+      <button class="tiny" ${en.ready?'':'disabled'}
+        onclick="event.stopPropagation();playHash('${en.h}')"
+        title="${en.ready?'hear it — straight from the cache'
+                :'its wav is not on this machine — choosing it will render again'}">▶</button>
+      <span class="hwhat">${cur?'● ':''}<b>${esc(d.engine||'chatterbox')}</b>${
+        who?` · ${esc(who)}`:''}${en.take?` · ${takeName(en.take)}`:''}${
+        en.ready&&en.secs!=null?` · ${en.secs.toFixed(1)}s`:' · not on this machine'}${
+        words?` <span class="mut">— ${esc(words.slice(0,52))}${words.length>52?'…':''}</span>`:''}</span>
+      <button class="tiny" onclick="event.stopPropagation();histDrop(${id},'${en.h}')"
+        title="forget this render — the wav itself stays on disk">✕</button>
+    </div>`;
+  });
+  CTX.innerHTML=`<div class="mut" style="font-size:10.5px;padding:2px 6px 4px">${
+    rows.length?'every render this card has made, newest first — the words, the take and the delivery ride along'
+               :'no renders remembered yet — press Render and they will be'}</div>`
+    +rows.join('');
+  // openCtx measured an empty shell — take the screen-edge clamp again
+  CTX.style.left=Math.max(6,Math.min(e.clientX,innerWidth-CTX.offsetWidth-8))+'px';
+  CTX.style.top=Math.max(6,Math.min(e.clientY,innerHeight-CTX.offsetHeight-8))+'px';
+  CTX.addEventListener('click',ev=>{
+    const row=ev.target.closest('.hrow'); if(!row)return;
+    closeCtx(); histRestore(id,byh[row.dataset.h]);
+  });
+}
+async function histRestore(id,en){
+  if(!en)return;
+  // everything the render wore goes back on the card: the words, the take,
+  // the profile, and the composed delivery pinned as per-card overrides —
+  // the server keeps only the keys a card may override (CARD_PARAMS), and
+  // voice rides on the profile, which is why the profile comes back too
+  const patch={name:DOC.name,id,seed:en.take||0,
+               profile:en.profile||'Default',params:{...(en.d||{})}};
+  if('text' in en)patch.text=en.text;
+  const r=await api('/api/chunk',patch);
+  if(r.error)return void($('status').innerHTML=`<span class="warn">${esc(r.error)}</span>`);
+  await open_(DOC.name,true,id);
+  const now=DOC.chunks.find(x=>x.id===id);
+  if(now&&now.ready){
+    $('s'+id).textContent='brought back — already rendered, playing it';
+    playFull(id);
+  }else $('s'+id).textContent=
+    'brought back — its wav is not on this machine, Render makes it again'+
+    ' (⌘Z undoes the whole restore)';
+}
+async function histDrop(id,h){
+  const r=await api('/api/history/drop',{name:DOC.name,id,h});
+  if(r.error)return void($('status').innerHTML=`<span class="warn">${esc(r.error)}</span>`);
+  await syncCards();
+  $('status').textContent='forgotten — the wav itself stays on disk';
 }
 
 // "runs on" — no rest before this card. Splitting a sentence so a phrase can
@@ -6874,7 +6970,7 @@ function renderQueue(){
                  .slice(-15).reverse();
   let html='';
   if(st.paused)html+=`<div class="qrow" style="border:1px dashed var(--amber);border-radius:6px;border-bottom:1px dashed var(--amber)">
-    <span class="qstat">⏸ held</span><span class="qwhat">the queue is paused — press Resume to keep printing</span></div>`;
+    <span class="qstat">⏸ held</span><span class="qwhat">the queue is paused — press Resume to keep rendering</span></div>`;
   if(st.bake&&st.bake.running)
     html+=`<div class="qrow"><span class="qstat"><span class="warn">▶</span> baking</span>
       <span class="qwhat"><b>render stale cards</b> — ${esc(title(st.bake.project))} · ${

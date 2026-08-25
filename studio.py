@@ -679,6 +679,61 @@ def chunk_hash(c, doc, profs=None):
     return hashlib.sha256(json.dumps(key, sort_keys=True).encode()).hexdigest()[:20]
 
 
+def delivery_of(c, doc, profs=None):
+    """The composed delivery a render actually spoke with — the keys
+    chunk_hash reads for this card's engine, branch for branch, plus the
+    voice it wore. Filed into the card's history so a reading can be
+    brought back whole. The card-overridable keys restore straight into
+    c["params"]; voice, kvoice and lang live only in the profile, so a
+    restored reading is exact while its profile still says what it said,
+    and honestly re-renders when the profile has moved on."""
+    p = params_for(c, doc, profs)
+    if c.get("type") == "voiced":
+        return {"engine": "chatterbox", "voice": p["voice"]}
+    e = p["engine"]
+    if e == "chatterbox":
+        return {"engine": e, "voice": p["voice"], "exag": p["exag"],
+                "cfg": p["cfg"], "temp": p["temp"], "rep": p["rep"]}
+    if e == "kokoro":
+        return {"engine": e, "kvoice": p["kvoice"],
+                "speed": float(p["speed"] or 0)}
+    out = {"engine": e, "voice": p["voice"], "lang": p["lang"],
+           "speed": float(p["speed"] or 0)}
+    if p.get("duration"):
+        out["duration"] = float(p["duration"])
+    return out
+
+
+def file_history(project, cid, c, doc, h):
+    """Every render a card has ever made, remembered ON the card: the words
+    as they were spelled for the model, the take, the profile and the
+    composed delivery that produced hash h — enough to bring that exact
+    sound back with one gesture, cached wav and all. This is the other axis
+    from takes: a take re-rolls the same reading, history spans every
+    respelling, engine switch and dial change the card has been through.
+    Keyed by hash, so re-rendering the same state refreshes its entry
+    rather than growing a twin. `c` and `doc` are the copies the render
+    actually spoke from — the live doc may already say something newer,
+    which is exactly why the snapshot is taken from these."""
+    entry = {"h": h, "at": int(time.time()),
+             "take": int(c.get("seed") or 0),
+             "profile": c.get("profile", "Default"),
+             "d": delivery_of(c, doc)}
+    if is_speech(c):
+        entry["text"] = c["text"]
+    with _docmut:
+        live = load(project)
+        c2 = (next((x for x in live["chunks"] if x["id"] == cid), None)
+              if live else None)
+        if c2 is None or not is_renderable(c2):
+            return                       # the card left while it rendered
+        hist = [e for e in (c2.get("hist") or [])
+                if isinstance(e, dict) and e.get("h") != h]
+        hist.append(entry)
+        c2["hist"] = hist[-24:]          # a shortlist, not an archive
+        save(live)
+
+
 def is_speech(c):
     """Does this card have prose in it? Guards every c["text"] access."""
     return c.get("type", "speech") == "speech"
@@ -3566,6 +3621,9 @@ def worker():
             else:
                 h, cached = render_any(c, doc, force=True)
                 j.update(hash=h)
+                # previews speak a selection, never the whole card, so only
+                # real renders join the card's history
+                file_history(j["project"], j["chunk"], c, doc, h)
             j.update(status="done", seconds=round(time.time() - t0, 1))
         except Exception as ex:
             j.update(status="error", error=f"{type(ex).__name__}: {ex}")
@@ -3599,7 +3657,8 @@ def bake(name):
             _bake["label"] = (c["text"][:60] if is_speech(c)
                               else "◎ " + (c.get("perfname") or "performance"))
             try:
-                render_any(c, doc)
+                h, _ = render_any(c, doc)
+                file_history(name, c["id"], c, doc, h)
             except Exception as ex:
                 # A bake must never die silently — but one strange card must
                 # not stop the other 139 either. A card's failure is noted
@@ -4979,6 +5038,29 @@ class H(BaseHTTPRequestHandler):
                 "jobs": js[-80:], "paused": paused, "bake": _bake,
                 "busy": sum(1 for j in js
                             if j["status"] in ("queued", "running"))})
+        if u.path == "/api/history":
+            # the render-history menu: every way this card has been
+            # rendered, each entry told whether its wav is still on this
+            # machine (a transferred project keeps the entries, not the
+            # audio — restoring one of those re-renders, and says so)
+            doc = load(q.get("name", [""])[0])
+            if not doc:
+                return self._send(404, {"error": "no such project"})
+            cid = int(q.get("id", ["-1"])[0])
+            c = next((x for x in doc["chunks"] if x["id"] == cid), None)
+            if c is None or not is_renderable(c):
+                return self._send(400, {"error": "that card does not render"})
+            out = []
+            for e in (c.get("hist") or []):
+                if not isinstance(e, dict) or not e.get("h"):
+                    continue
+                f = AUDIO / f"{e['h']}.wav"
+                have = f.exists()
+                out.append({**e, "ready": have,
+                            **({"secs": round(clip_secs(f), 2)}
+                               if have else {})})
+            return self._send(200, {"hist": out,
+                                    "current": chunk_hash(c, doc)})
 
         if u.path == "/api/audio":
             f = AUDIO / f"{q.get('h',[''])[0]}.wav"
@@ -6654,6 +6736,24 @@ class H(BaseHTTPRequestHandler):
                               if j["status"] in ("done", "error", "canceled")]:
                         _jobs.pop(k)
                 return self._send(200, {"ok": True})
+            if u.path == "/api/history/drop":
+                # forget one entry from a card's render history. The wav
+                # stays in audio/ — the same law as dropping an image
+                # variant: only the shortlist forgets
+                doc = load(d["name"])
+                c = next((x for x in doc["chunks"]
+                          if x["id"] == d.get("id")), None)
+                if c is None:
+                    return self._send(404, {"error": "no such card"})
+                h = str(d.get("h") or "")
+                hist = [e for e in (c.get("hist") or [])
+                        if isinstance(e, dict) and e.get("h") != h]
+                if hist:
+                    c["hist"] = hist
+                else:
+                    c.pop("hist", None)
+                save(doc)
+                return self._send(200, {"ok": True, "left": len(hist)})
 
 
             if u.path == "/api/bake":
