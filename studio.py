@@ -7285,8 +7285,7 @@ class H(BaseHTTPRequestHandler):
                         if c.get("fade"):
                             e["fade"] = list(c["fade"])[:2]
                     else:
-                        h = chunk_hash(c, doc, profs)
-                        e["url"] = f"/api/card_wav?name={nm}&id={c['id']}&h={h}"
+                        e["url"] = f"/api/card_wav?name={nm}&id={c['id']}"
                         e["gain"] = float(params_for(c, doc, profs)
                                           .get("gain", 100)) / 100.0
                     evs.append(e)
