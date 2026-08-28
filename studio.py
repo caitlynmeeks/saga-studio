@@ -7252,18 +7252,6 @@ class H(BaseHTTPRequestHandler):
                 doc = load(d["name"])
                 if not doc:
                     return self._send(404, {"error": "no such story"})
-                # Wait for pending render jobs to complete. If a card is rendering
-                # when mix_plan is requested, the audio file doesn't exist yet, so
-                # it gets a chime instead, which is way too short and throws off
-                # timing for all subsequent cards.
-                for _ in range(100):  # max 10s wait
-                    with _qlock:
-                        rendering = [j for j in _jobs.values()
-                                   if j["project"] == d["name"] and j["kind"] == "render"
-                                   and j["status"] in ("queued", "running")]
-                    if not rendering:
-                        break
-                    time.sleep(0.1)
                 frm, upto = d.get("from"), d.get("upto")
                 import soundfile as sf
                 memo = {}
@@ -7297,7 +7285,15 @@ class H(BaseHTTPRequestHandler):
                         if c.get("fade"):
                             e["fade"] = list(c["fade"])[:2]
                     else:
-                        e["url"] = f"/api/card_wav?name={nm}&id={c['id']}"
+                        # h names the CONTENT. The desk caches decoded audio
+                        # by URL across plays, and a split, insert or delete
+                        # renumbers every id downstream — so an id-only URL
+                        # would hand a renumbered card its predecessor's
+                        # decode, one slot off and the wrong length. The
+                        # server ignores h; it exists to make the cache key
+                        # honest.
+                        e["url"] = (f"/api/card_wav?name={nm}&id={c['id']}"
+                                    f"&h={chunk_hash(c, doc, profs)}")
                         e["gain"] = float(params_for(c, doc, profs)
                                           .get("gain", 100)) / 100.0
                     evs.append(e)
