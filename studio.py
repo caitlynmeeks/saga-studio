@@ -7252,6 +7252,18 @@ class H(BaseHTTPRequestHandler):
                 doc = load(d["name"])
                 if not doc:
                     return self._send(404, {"error": "no such story"})
+                # Wait for pending render jobs to complete. If a card is rendering
+                # when mix_plan is requested, the audio file doesn't exist yet, so
+                # it gets a chime instead, which is way too short and throws off
+                # timing for all subsequent cards.
+                for _ in range(100):  # max 10s wait
+                    with _qlock:
+                        rendering = [j for j in _jobs.values()
+                                   if j["project"] == d["name"] and j["kind"] == "render"
+                                   and j["status"] in ("queued", "running")]
+                    if not rendering:
+                        break
+                    time.sleep(0.1)
                 frm, upto = d.get("from"), d.get("upto")
                 import soundfile as sf
                 memo = {}
